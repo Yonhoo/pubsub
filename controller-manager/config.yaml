@@ -1,0 +1,186 @@
+# ============================================
+# Controller-Manager 配置文件
+# ============================================
+# 说明：
+# 1. 支持环境变量替换：${VAR_NAME:default_value}
+# 2. 环境变量优先级高于配置文件
+# 3. 如果环境变量和配置文件都未设置，则使用默认值
+
+# 服务器配置
+server:
+  # 服务器 ID
+  id: ${SERVER_ID:controller-1}
+  # gRPC 监听端口
+  port: ${SERVER_PORT:50051}
+  # 监听地址
+  addr: ${SERVER_ADDR:0.0.0.0:50051}
+
+# 数据库配置
+database:
+  # MySQL 连接信息
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:3306}
+  user: ${DB_USER:pubsub}
+  password: ${DB_PASSWORD:pubsub123}
+  database: ${DB_NAME:pubsub}
+  charset: ${DB_CHARSET:utf8mb4}
+  # 连接池配置
+  max_open_conns: 100
+  max_idle_conns: 20
+  conn_max_lifetime: 3600s
+  # 日志级别
+  log_level: warn
+
+# Redis 配置
+redis:
+  # Redis 地址
+  addr: ${REDIS_ADDR:localhost:6379}
+  # 密码（如果需要）
+  password: ${REDIS_PASSWORD:}
+  # 数据库编号
+  db: ${REDIS_DB:0}
+  # 连接池配置
+  pool_size: 10
+  min_idle_conns: 5
+
+# ETCD 配置（服务发现）
+etcd:
+  # ETCD 端点列表
+  endpoints:
+    - ${ETCD_ENDPOINTS:localhost:2379}
+  # 连接超时
+  dial_timeout: 5s
+  # 请求超时
+  request_timeout: 10s
+
+# RPC 配置
+rpc:
+  # 超时时间
+  timeout: ${RPC_TIMEOUT_SECONDS:10s}
+  # 重试次数
+  max_retries: 3
+  # 重试间隔
+  retry_interval: 1s
+
+# Room 配置（聊天室配置）
+room:
+  # 房间桶数量（用于分片存储）
+  bucket_size: ${ROOM_BUCKET_SIZE:16}
+  # 房间队列大小
+  queue_size: ${ROOM_QUEUE_SIZE:1024}
+
+# Bucket 配置（环形缓冲区）
+bucket:
+  # 缓冲区大小
+  size: ${BUCKET_SIZE:32}
+  # 通道大小
+  channel: ${BUCKET_CHANNEL:1024}
+  # 房间大小
+  room: ${BUCKET_ROOM:1024}
+  # 协程数量
+  num: 16
+
+# TCP 配置
+tcp:
+  # TCP 保活间隔
+  keepalive_interval: 60s
+  # 读缓冲区大小
+  read_buf_size: 262144
+  # 写缓冲区大小
+  write_buf_size: 65536
+
+# Protocol 配置
+protocol:
+  # 协议类型
+  type: pb
+  # 压缩方式（none, gzip, snappy）
+  compression: none
+  # 定时器数量
+  timer: 32
+  # 定时器大小
+  timer_size: 2048
+  # 服务端协议数量
+  svr_proto: 10
+  # 客户端协议数量
+  cli_proto: 5
+  # 握手超时
+  handshake_timeout: 5s
+
+# Getty 协议栈配置（针对 TCP 通信）
+getty:
+  # 应用名称
+  app_name: ${GETTY_APP_NAME:pubsub-controller}
+  # 监听地址
+  host: ${GETTY_HOST:0.0.0.0}
+  # 监听端口
+  ports:
+    - ${GETTY_PORT:8080}
+  # 路径
+  paths:
+    - ${GETTY_PATH:/connect}
+  # Profile 端口
+  profile_port: ${GETTY_PROFILE_PORT:10086}
+  # 心跳周期
+  heartbeat_period: ${GETTY_HEARTBEAT_PERIOD:60s}
+  # 会话超时
+  session_timeout: ${GETTY_SESSION_TIMEOUT:60s}
+  # 会话数量
+  session_number: ${GETTY_SESSION_NUMBER:1000}
+  # 快速失败超时
+  fail_fast_timeout: ${GETTY_FAIL_FAST_TIMEOUT:5s}
+  
+  # Getty 会话参数
+  session_param:
+    compress_encoding: false
+    tcp_no_delay: true
+    tcp_keep_alive: true
+    tcp_read_buf_size: 262144
+    tcp_write_buf_size: 65536
+    pkg_rq_size: 1024
+    pkg_wq_size: 1024
+    tcp_read_timeout: 1m
+    tcp_write_timeout: 1m
+    wait_timeout: 1m
+    max_msg_len: 1024000
+    session_name: pubsub-controller-session
+
+# Logging 配置
+logging:
+  # 日志级别 (debug, info, warn, error)
+  level: info
+  # 日志格式
+  format: json
+  # 日志输出 (stdout, file)
+  output: stdout
+  # 日志文件路径（如果输出为 file）
+  file_path: /var/log/pubsub/controller.log
+  # 日志文件大小（MB）
+  max_size: 100
+  # 保留日志天数
+  max_days: 30
+
+# 追踪配置
+tracing:
+  # 追踪启用
+  enabled: true
+  # 导出器类型 (jaeger, stdout)
+  exporter_type: jaeger
+  # Jaeger 端点
+  jaeger_endpoint: http://jaeger:14268/api/traces
+  # 采样率 (0-1)
+  sample_rate: 1.0
+
+# Metrics 配置
+metrics:
+  # Metrics 启用
+  enabled: true
+  # Metrics 端口
+  port: 9090
+  # Metrics 路径
+  path: /metrics
+
+
+
+
+
+

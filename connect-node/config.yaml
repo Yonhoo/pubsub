@@ -1,0 +1,74 @@
+# ============================================
+# Connect-Node 配置文件
+# ============================================
+
+# 服务器配置
+server:
+  id: ${SERVER_ID:connect-node-1}
+  port: ${SERVER_PORT:50052}
+  addr: ${SERVER_ADDR:0.0.0.0:50052}
+
+# 数据库配置（Connect-Node 不直接使用数据库，通过 Controller 访问）
+database:
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:3306}
+  user: ${DB_USER:pubsub}
+  password: ${DB_PASSWORD:pubsub123}
+  database: ${DB_NAME:pubsub}
+  charset: utf8mb4
+
+# Redis 配置
+redis:
+  addr: ${REDIS_ADDR:localhost:6379}
+  password: ${REDIS_PASSWORD:}
+  db: 0
+
+# ETCD 配置（服务发现）
+etcd:
+  endpoints:
+    - ${ETCD_ENDPOINTS:localhost:2379}
+
+# RPC 配置
+rpc:
+  timeout: 30s  # 增加超时时间以支持 ETCD 服务发现
+
+# Bucket 配置（用户连接管理）
+bucket:
+  size: 32
+  channel: 1024
+  room: 1024
+
+# Getty WebSocket 配置
+getty:
+  app_name: ${GETTY_APP_NAME:pubsub-connect-node}
+  # WebSocket 监听地址
+  host: ${GETTY_HOST:0.0.0.0}
+  # WebSocket 监听端口（与 Docker 保持一致）
+  ports:
+    - ${GETTY_PORT:8083}
+  # WebSocket 路径
+  paths:
+    - /connect
+  # 心跳周期
+  heartbeat_period: 60s
+  # 会话超时
+  session_timeout: 60s
+  # 最大会话数
+  session_number: 10000
+  
+  # Getty 会话参数
+  session_param:
+    compress_encoding: false
+    tcp_no_delay: true
+    tcp_keep_alive: true
+    tcp_read_buf_size: 262144
+    tcp_write_buf_size: 65536
+    pkg_rq_size: 1024
+    pkg_wq_size: 1024
+    tcp_read_timeout: 1m
+    tcp_write_timeout: 1m
+    wait_timeout: 1m
+    max_msg_len: 1024000
+    session_name: pubsub-connect-session
+
+

@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package protocol;
+
+message Proto {
+    int32 ver = 1;       // 协议版本
+    int32 op = 2;        // 操作码
+    int32 seq = 3;       // 序列号
+    string roomid = 4;   // 房间 ID
+    string userid = 5;   // 用户 ID
+    bytes body = 6;      // 消息体
+}
+

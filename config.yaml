@@ -1,0 +1,147 @@
+# ============================================
+# Pub-Sub 系统配置文件
+# ============================================
+
+# 服务器配置
+server:
+  # 监听地址（支持逗号分隔的多个地址）
+  addr: "0.0.0.0:50052"
+
+# 数据库配置
+database:
+  # MySQL 连接信息
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:3306}
+  user: ${DB_USER:pubsub}
+  password: ${DB_PASSWORD:pubsub123}
+  database: ${DB_NAME:pubsub}
+  # 连接池配置
+  max_open_conns: 100
+  max_idle_conns: 20
+  conn_max_lifetime: 3600s
+  # 日志级别
+  log_level: warn
+
+# Redis 配置
+redis:
+  # Redis 地址（支持逗号分隔的多个地址）
+  addr: ${REDIS_ADDR:localhost:6379}
+  # 密码（如果需要）
+  password: ""
+  # 数据库编号
+  db: 0
+  # 连接池配置
+  pool_size: 10
+  min_idle_conns: 5
+
+# ETCD 配置（服务发现）
+etcd:
+  # ETCD 端点列表
+  endpoints:
+    - ${ETCD_ENDPOINTS:localhost:2379}
+  # 连接超时
+  dial_timeout: 5s
+  # 请求超时
+  request_timeout: 10s
+
+# RPC 配置
+rpc:
+  # 超时时间
+  timeout: 10s
+  # 重试次数
+  max_retries: 3
+  # 重试间隔
+  retry_interval: 1s
+
+# Room 配置（聊天室配置）
+room:
+  # 房间桶数量（用于分片存储）
+  bucket_size: 16
+  # 房间队列大小
+  queue_size: 1024
+
+# Bucket 配置（环形缓冲区）
+bucket:
+  # 缓冲区大小
+  size: 32
+  # 个数
+  num: 16
+
+# TCP 配置
+tcp:
+  # TCP 保活间隔
+  keepalive_interval: 60s
+  # 读缓冲区大小
+  read_buf_size: 262144
+  # 写缓冲区大小
+  write_buf_size: 65536
+
+# Protocol 配置
+protocol:
+  # 协议类型
+  type: pb
+  # 压缩方式（none, gzip, snappy）
+  compression: none
+
+# Getty 协议栈配置（针对 WebSocket 通信）
+getty:
+  app_name: pubsub-server
+  host: 0.0.0.0
+  ports:
+    - "8080"
+  paths:
+    - "/connect"
+  profile_port: 10086
+  heartbeat_period: 60s
+  session_timeout: 60s
+  session_number: 10000
+  fail_fast_timeout: 5s
+  
+  session_param:
+    compress_encoding: false
+    tcp_no_delay: true
+    tcp_keep_alive: true
+    tcp_read_buf_size: 262144
+    tcp_write_buf_size: 65536
+    pkg_rq_size: 1024
+    pkg_wq_size: 1024
+    tcp_read_timeout: 1m
+    tcp_write_timeout: 1m
+    wait_timeout: 1m
+    max_msg_len: 1024000
+    session_name: pubsub-session
+
+# Logging 配置
+logging:
+  # 日志级别 (debug, info, warn, error)
+  level: info
+  # 日志格式
+  format: json
+  # 日志输出 (stdout, file)
+  output: stdout
+  # 日志文件路径（如果输出为 file）
+  file_path: /var/log/pubsub/app.log
+  # 日志文件大小（MB）
+  max_size: 100
+  # 保留日志天数
+  max_days: 30
+
+# 追踪配置
+tracing:
+  # 追踪启用
+  enabled: true
+  # 导出器类型 (jaeger, stdout)
+  exporter_type: jaeger
+  # Jaeger 端点
+  jaeger_endpoint: http://jaeger:14268/api/traces
+  # 采样率 (0-1)
+  sample_rate: 1.0
+
+# Metrics 配置
+metrics:
+  # Metrics 启用
+  enabled: true
+  # Metrics 端口
+  port: 9090
+  # Metrics 路径
+  path: /metrics

@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PubSub 聊天室</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            width: 100%;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 90vh;
+            max-height: 800px;
+            min-height: 0; /* 确保 flex 子元素可以正确收缩 */
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ff4444;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected {
+            background: #44ff44;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .login-section {
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            align-items: center;
+            justify-content: center;
+            flex: 1;
+        }
+
+        .login-section.hidden {
+            display: none;
+        }
+
+        .input-group {
+            width: 100%;
+            max-width: 400px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 12px 32px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .chat-section {
+            display: none;
+            flex: 1;
+            flex-direction: column;
+            min-height: 0; /* 确保 flex 子元素可以正确收缩 */
+        }
+
+        .chat-section.active {
+            display: flex;
+        }
+
+        .chat-info {
+            padding: 15px 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-info span {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .chat-info strong {
+            color: #333;
+        }
+
+        .messages {
+            flex: 1;
+            min-height: 0; /* 确保可以滚动 */
+            padding: 20px 30px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            background: #f8f9fa;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 70%;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.own {
+            align-self: flex-end;
+            align-items: flex-end;
+        }
+
+        .message.other {
+            align-self: flex-start;
+            align-items: flex-start;
+        }
+
+        .message.system {
+            align-self: center;
+            max-width: 90%;
+        }
+
+        .message-header {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .message-sender {
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .message-time {
+            color: #999;
+        }
+
+        .message-bubble {
+            padding: 12px 16px;
+            border-radius: 18px;
+            word-wrap: break-word;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .message.own .message-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.other .message-bubble {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.system .message-bubble {
+            background: #fffbea;
+            color: #856404;
+            text-align: center;
+            border-radius: 10px;
+            font-size: 13px;
+            padding: 8px 16px;
+        }
+
+        .input-area {
+            flex-shrink: 0; /* 防止被挤压，始终可见 */
+            padding: 20px 30px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 15px;
+        }
+
+        .input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 25px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .input-area input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .send-btn {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .send-btn:hover {
+            transform: scale(1.05);
+        }
+
+        .send-btn:active {
+            transform: scale(0.95);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* 滚动条样式 */
+        .messages::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .messages::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+
+        .messages::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 10px;
+        }
+
+        .messages::-webkit-scrollbar-thumb:hover {
+            background: #764ba2;
+        }
+
+        .error-message {
+            color: #ff4444;
+            font-size: 14px;
+            margin-top: 10px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 PubSub 聊天室</h1>
+            <div class="status">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">未连接</span>
+            </div>
+        </div>
+
+        <!-- 登录界面 -->
+        <div class="login-section" id="loginSection">
+            <div class="input-group">
+                <label for="userId">用户 ID</label>
+                <input type="text" id="userId" placeholder="请输入用户 ID，例如：user-001" />
+            </div>
+            <div class="input-group">
+                <label for="userName">用户名</label>
+                <input type="text" id="userName" placeholder="请输入您的昵称" />
+            </div>
+            <div class="input-group">
+                <label for="roomId">房间 ID</label>
+                <input type="text" id="roomId" placeholder="请输入房间 ID，例如：room-001" value="room-001" />
+            </div>
+            <button class="btn" id="joinBtn">加入房间</button>
+            <div class="error-message" id="errorMessage"></div>
+        </div>
+
+        <!-- 聊天界面 -->
+        <div class="chat-section" id="chatSection">
+            <div class="chat-info">
+                <span>房间: <strong id="currentRoom">-</strong></span>
+                <span>用户: <strong id="currentUser">-</strong></span>
+            </div>
+            <div class="messages" id="messages"></div>
+            <div class="input-area">
+                <input type="text" id="messageInput" placeholder="输入消息..." />
+                <button class="send-btn" id="sendBtn">发送</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <!-- 使用国内 CDN 镜像 bootcdn -->
+    <script src="https://cdn.bootcdn.net/ajax/libs/protobufjs/7.2.5/protobuf.min.js"></script>
+    <script>
+        // WebSocket 客户端类
+        class ChatClient {
+            constructor() {
+                this.ws = null;
+                this.userId = null;
+                this.userName = null;
+                this.roomId = null;
+                this.connected = false;
+                this.protoRoot = null;
+                this.Proto = null;
+            }
+
+            async init() {
+                // 加载 protobuf 定义
+                this.protoRoot = await protobuf.load('/protocol.proto');
+                this.Proto = this.protoRoot.lookupType('protocol.Proto');
+            }
+
+            connect(userId, userName, roomId) {
+                this.userId = userId;
+                this.userName = userName;
+                this.roomId = roomId;
+
+                const wsUrl = `${CONFIG.WS_URL}?user_id=${userId}&user_name=${userName}&room_id=${roomId}`;
+                console.log('🔗 连接 WebSocket:', wsUrl);
+                this.ws = new WebSocket(wsUrl);
+                this.ws.binaryType = 'arraybuffer';
+
+                this.ws.onopen = () => {
+                    console.log('✅ WebSocket 连接成功');
+                    this.connected = true;
+                    this.updateStatus(true);
+                    this.joinRoom();
+                };
+
+                this.ws.onmessage = (event) => {
+                    this.handleMessage(event.data);
+                };
+
+                this.ws.onerror = (error) => {
+                    console.error('❌ WebSocket 错误:', error);
+                    this.updateStatus(false);
+                    this.showError('连接失败，请检查服务器是否运行');
+                };
+
+                this.ws.onclose = () => {
+                    console.log('👋 WebSocket 连接关闭');
+                    this.connected = false;
+                    this.updateStatus(false);
+                    this.showError('连接已断开');
+                };
+            }
+
+            joinRoom() {
+                const message = {
+                    ver: 1,
+                    op: 1, // 加入房间
+                    seq: 1,
+                    roomid: this.roomId,
+                    userid: this.userId,
+                    body: new TextEncoder().encode(this.userName)
+                };
+
+                this.sendProto(message);
+                console.log('🚪 发送加入房间请求');
+            }
+
+            sendMessage(text) {
+                if (!this.connected) {
+                    this.showError('未连接到服务器');
+                    return;
+                }
+
+                // 通过 HTTP API 发送广播消息
+                const apiUrl = `${CONFIG.API_URL}/broadcast`;
+                console.log('📤 发送消息到:', apiUrl);
+                fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        room_id: this.roomId,
+                        message: `${this.userName}: ${text}`
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('✅ 消息已发送', data);
+                    // 添加自己的消息到界面
+                    this.addMessage({
+                        sender: this.userName,
+                        content: text,
+                        isOwn: true,
+                        time: new Date()
+                    });
+                })
+                .catch(error => {
+                    console.error('❌ 发送失败:', error);
+                    this.showError('发送消息失败');
+                });
+            }
+
+            sendProto(message) {
+                try {
+                    // 服务器期望的二进制协议格式：
+                    // [packLen(4)] [headerLen(2)] [Ver(2)] [Op(4)] [Seq(4)] [RoomIdLen(2)] [RoomId(...)] [UserIdLen(2)] [UserId(...)] [Body(...)]
+                    const roomIdBytes = new TextEncoder().encode(message.roomid || '');
+                    const userIdBytes = new TextEncoder().encode(message.userid || '');
+                    const bodyBytes = message.body instanceof Uint8Array ? message.body : 
+                                     (message.body ? new TextEncoder().encode(String(message.body)) : new Uint8Array(0));
+                    
+                    const _rawHeaderSize = 16; // 4 + 2 + 2 + 4 + 4
+                    const _stringLenSize = 2;
+                    
+                    // 计算总包长度
+                    const packLen = _rawHeaderSize + 
+                                   _stringLenSize + roomIdBytes.length +
+                                   _stringLenSize + userIdBytes.length +
+                                   bodyBytes.length;
+                    
+                    // 创建数据包
+                    const packet = new ArrayBuffer(packLen);
+                    const view = new DataView(packet);
+                    let offset = 0;
+                    
+                    // packLen (4字节，大端)
+                    view.setUint32(offset, packLen, false);
+                    offset += 4;
+                    
+                    // headerLen (2字节，大端，固定为16)
+                    view.setUint16(offset, _rawHeaderSize, false);
+                    offset += 2;
+                    
+                    // Ver (2字节，大端)
+                    view.setUint16(offset, message.ver || 1, false);
+                    offset += 2;
+                    
+                    // Op (4字节，大端)
+                    view.setUint32(offset, message.op || 0, false);
+                    offset += 4;
+                    
+                    // Seq (4字节，大端)
+                    view.setUint32(offset, message.seq || 0, false);
+                    offset += 4;
+                    
+                    // RoomIdLen (2字节，大端) + RoomId
+                    view.setUint16(offset, roomIdBytes.length, false);
+                    offset += 2;
+                    new Uint8Array(packet, offset, roomIdBytes.length).set(roomIdBytes);
+                    offset += roomIdBytes.length;
+                    
+                    // UserIdLen (2字节，大端) + UserId
+                    view.setUint16(offset, userIdBytes.length, false);
+                    offset += 2;
+                    new Uint8Array(packet, offset, userIdBytes.length).set(userIdBytes);
+                    offset += userIdBytes.length;
+                    
+                    // Body
+                    if (bodyBytes.length > 0) {
+                        new Uint8Array(packet, offset, bodyBytes.length).set(bodyBytes);
+                    }
+                    
+                    this.ws.send(packet);
+                } catch (error) {
+                    console.error('❌ 发送消息失败:', error);
+                }
+            }
+
+            handleMessage(data) {
+                try {
+                    // 解析服务器的二进制协议格式：
+                    // [packLen(4)] [headerLen(2)] [Ver(2)] [Op(4)] [Seq(4)] [RoomIdLen(2)] [RoomId(...)] [UserIdLen(2)] [UserId(...)] [Body(...)]
+                    const view = new DataView(data);
+                    let offset = 0;
+                    
+                    // packLen (4字节，大端)
+                    const packLen = view.getUint32(offset, false);
+                    offset += 4;
+                    
+                    // headerLen (2字节，大端)
+                    const headerLen = view.getUint16(offset, false);
+                    offset += 2;
+                    
+                    // Ver (2字节，大端)
+                    const ver = view.getUint16(offset, false);
+                    offset += 2;
+                    
+                    // Op (4字节，大端)
+                    const op = view.getUint32(offset, false);
+                    offset += 4;
+                    
+                    // Seq (4字节，大端)
+                    const seq = view.getUint32(offset, false);
+                    offset += 4;
+                    
+                    // RoomIdLen (2字节，大端) + RoomId
+                    const roomIdLen = view.getUint16(offset, false);
+                    offset += 2;
+                    const roomId = roomIdLen > 0 ? 
+                        new TextDecoder().decode(new Uint8Array(data, offset, roomIdLen)) : '';
+                    offset += roomIdLen;
+                    
+                    // UserIdLen (2字节，大端) + UserId
+                    const userIdLen = view.getUint16(offset, false);
+                    offset += 2;
+                    const userId = userIdLen > 0 ? 
+                        new TextDecoder().decode(new Uint8Array(data, offset, userIdLen)) : '';
+                    offset += userIdLen;
+                    
+                    // Body
+                    const bodyLen = packLen - offset;
+                    const body = bodyLen > 0 ? new Uint8Array(data, offset, bodyLen) : null;
+                    
+                    const message = {
+                        ver: ver,
+                        op: op,
+                        seq: seq,
+                        roomid: roomId,
+                        userid: userId,
+                        body: body
+                    };
+                    
+                    console.log('📥 收到消息:', message);
+                    this.handleProtoMessage(message);
+                } catch (error) {
+                    console.error('❌ 解析消息失败:', error);
+                }
+            }
+
+            handleProtoMessage(msg) {
+                switch (msg.op) {
+                    case 2: // 加入房间响应 或 广播消息
+                        if (msg.body && msg.body.length > 0) {
+                            // 广播消息
+                            const content = new TextDecoder().decode(msg.body);
+                            // 解析消息格式: "用户名: 消息内容"
+                            const match = content.match(/^(.+?):\s*(.+)$/);
+                            if (match) {
+                                const [, sender, text] = match;
+                                // 不是自己发送的消息才显示
+                                if (sender !== this.userName) {
+                                    this.addMessage({
+                                        sender: sender,
+                                        content: text,
+                                        isOwn: false,
+                                        time: new Date()
+                                    });
+                                }
+                            } else {
+                                // 系统消息
+                                this.addSystemMessage(content);
+                            }
+                        } else {
+                            // 加入房间成功
+                            this.addSystemMessage(`✅ 成功加入房间: ${msg.roomid}`);
+                        }
+                        break;
+
+                    case 6: // 心跳响应
+                        console.log('💓 心跳响应');
+                        break;
+
+                    default:
+                        console.log('⚠️ 未知消息类型:', msg.op);
+                }
+            }
+
+            addMessage({ sender, content, isOwn, time }) {
+                const messagesDiv = document.getElementById('messages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${isOwn ? 'own' : 'other'}`;
+
+                const timeStr = time.toLocaleTimeString('zh-CN', { 
+                    hour: '2-digit', 
+                    minute: '2-digit' 
+                });
+
+                messageDiv.innerHTML = `
+                    <div class="message-header">
+                        <span class="message-sender">${sender}</span>
+                        <span class="message-time">${timeStr}</span>
+                    </div>
+                    <div class="message-bubble">${this.escapeHtml(content)}</div>
+                `;
+
+                messagesDiv.appendChild(messageDiv);
+                // 使用 requestAnimationFrame 确保 DOM 更新后再滚动
+                requestAnimationFrame(() => {
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                });
+            }
+
+            addSystemMessage(content) {
+                const messagesDiv = document.getElementById('messages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message system';
+                messageDiv.innerHTML = `<div class="message-bubble">${this.escapeHtml(content)}</div>`;
+                messagesDiv.appendChild(messageDiv);
+                // 使用 requestAnimationFrame 确保 DOM 更新后再滚动
+                requestAnimationFrame(() => {
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                });
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            updateStatus(connected) {
+                const statusDot = document.getElementById('statusDot');
+                const statusText = document.getElementById('statusText');
+
+                if (connected) {
+                    statusDot.classList.add('connected');
+                    statusText.textContent = '已连接';
+                } else {
+                    statusDot.classList.remove('connected');
+                    statusText.textContent = '未连接';
+                }
+            }
+
+            showError(message) {
+                const errorDiv = document.getElementById('errorMessage');
+                errorDiv.textContent = message;
+                setTimeout(() => {
+                    errorDiv.textContent = '';
+                }, 3000);
+            }
+
+            startHeartbeat() {
+                setInterval(() => {
+                    if (this.connected) {
+                        const message = {
+                            ver: 1,
+                            op: 5, // 心跳
+                            seq: Math.floor(Date.now() / 1000),
+                            roomid: this.roomId,
+                            userid: this.userId
+                        };
+                        this.sendProto(message);
+                    }
+                }, 30000); // 每 30 秒发送一次心跳
+            }
+        }
+
+        // 初始化
+        let client = null;
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            client = new ChatClient();
+            await client.init();
+
+            // 加入房间按钮
+            document.getElementById('joinBtn').addEventListener('click', () => {
+                const userId = document.getElementById('userId').value.trim();
+                const userName = document.getElementById('userName').value.trim();
+                const roomId = document.getElementById('roomId').value.trim();
+
+                if (!userId || !userName || !roomId) {
+                    client.showError('请填写所有字段');
+                    return;
+                }
+
+                // 切换到聊天界面
+                document.getElementById('loginSection').classList.add('hidden');
+                document.getElementById('chatSection').classList.add('active');
+                document.getElementById('currentRoom').textContent = roomId;
+                document.getElementById('currentUser').textContent = userName;
+
+                // 连接 WebSocket
+                client.connect(userId, userName, roomId);
+                client.startHeartbeat();
+            });
+
+            // 发送消息
+            const sendMessage = () => {
+                const input = document.getElementById('messageInput');
+                const text = input.value.trim();
+
+                if (!text) return;
+
+                client.sendMessage(text);
+                input.value = '';
+            };
+
+            document.getElementById('sendBtn').addEventListener('click', sendMessage);
+            document.getElementById('messageInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    sendMessage();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+

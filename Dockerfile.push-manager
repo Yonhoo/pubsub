@@ -1,0 +1,47 @@
+# Dockerfile for Push-Manager
+FROM golang:1.25-alpine AS builder
+
+# 安装必要的构建工具
+RUN apk add --no-cache git make gcc musl-dev
+
+WORKDIR /build
+
+# 配置 Go 代理加速（使用国内镜像）
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GO111MODULE=on
+
+# 复制 go.mod 和 go.sum
+COPY go.mod go.sum ./
+
+# 使用 --mount=type=cache 缓存 Go modules
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# 复制源代码
+COPY . .
+
+# 构建二进制文件
+WORKDIR /build/push-manager
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o push-manager .
+
+# 最终镜像
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+# 从构建阶段复制二进制文件
+COPY --from=builder /build/push-manager/push-manager .
+COPY --from=builder /build/config.yaml .
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+
+EXPOSE 50053 9093
+
+CMD ["./push-manager"]
+
+

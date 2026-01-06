@@ -1,0 +1,255 @@
+version: '3.8'
+
+services:
+  # ==================== 基础服务 ====================
+  
+  # MySQL 数据库
+  mysql:
+    image: mysql:8.0
+    container_name: pubsub-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: pubsub
+      MYSQL_USER: pubsub
+      MYSQL_PASSWORD: pubsub123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - pubsub-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: pubsub-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - pubsub-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ETCD 服务发现
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: pubsub-etcd
+    environment:
+      - ETCD_NAME=etcd0
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd-data:/etcd-data
+    networks:
+      - pubsub-network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Jaeger 链路追踪 (可选)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: pubsub-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4318:4318"    # OTLP HTTP
+    networks:
+      - pubsub-network
+
+  # ==================== 业务服务 ====================
+
+  # Controller Manager
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: pubsub-controller-1
+    environment:
+      - CONTROLLER_ID=controller-1
+      - NODE_ADDR=controller
+      - GRPC_PORT=50051
+      - METRICS_PORT=9090
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=pubsub
+      - DB_PASSWORD=pubsub123
+      - DB_NAME=pubsub
+      - REDIS_ADDR=redis:6379
+      - ETCD_ENDPOINTS=etcd:2379
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    networks:
+      - pubsub-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # Connect Node 1
+  connect-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.connect-node
+    container_name: pubsub-connect-node-1
+    environment:
+      - NODE_ID=connect-node-1
+      - NODE_ADDR=connect-node-1
+      - GRPC_PORT=50052
+      - HTTP_PORT=8083
+      - METRICS_PORT=9091
+      - GETTY_PORT=8083
+      - CONTROLLER_ADDRESS=controller:50051
+      - ETCD_ENDPOINTS=etcd:2379
+    ports:
+      - "50052:50052"
+      - "8083:8083"  # Getty WebSocket (统一使用 8083)
+      - "9091:9091"
+    depends_on:
+      controller:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+
+  # Connect Node 2
+  connect-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.connect-node
+    container_name: pubsub-connect-node-2
+    environment:
+      - NODE_ID=connect-node-2
+      - NODE_ADDR=connect-node-2
+      - GRPC_PORT=50052
+      - HTTP_PORT=8083
+      - METRICS_PORT=9091
+      - GETTY_PORT=8083
+      - CONTROLLER_ADDRESS=controller:50051
+      - ETCD_ENDPOINTS=etcd:2379
+    ports:
+      - "50055:50052"
+      - "8084:8083"  # Getty WebSocket
+      - "9092:9091"
+    depends_on:
+      controller:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+
+  # Connect Node 3
+  connect-node-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.connect-node
+    container_name: pubsub-connect-node-3
+    environment:
+      - NODE_ID=connect-node-3
+      - NODE_ADDR=connect-node-3
+      - GRPC_PORT=50052
+      - HTTP_PORT=8083
+      - METRICS_PORT=9091
+      - GETTY_PORT=8083
+      - CONTROLLER_ADDRESS=controller:50051
+      - ETCD_ENDPOINTS=etcd:2379
+    ports:
+      - "50056:50052"
+      - "8085:8083"  # Getty WebSocket
+      - "9094:9091"
+    depends_on:
+      controller:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+
+  # Push Manager
+  push-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.push-manager
+    container_name: pubsub-push-manager-1
+    environment:
+      - MANAGER_ID=push-manager-1
+      - GRPC_PORT=50053
+      - METRICS_PORT=9093
+      - ETCD_ENDPOINTS=etcd:2379
+    ports:
+      - "50053:50053"
+      - "9095:9093"
+    depends_on:
+      - etcd
+      - connect-node-1
+      - connect-node-2
+      - connect-node-3
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+
+  # Web Server (提供 Web 聊天界面 + HTTP API)
+  web-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: pubsub-web-server
+    environment:
+      - WEB_PORT=8086
+      - PUSH_MANAGER_ADDR=push-manager:50053
+    ports:
+      - "8086:8086"
+    depends_on:
+      - push-manager
+    networks:
+      - pubsub-network
+    restart: unless-stopped
+
+networks:
+  pubsub-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  redis-data:
+  etcd-data:
+
+

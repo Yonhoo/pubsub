@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package protocol;
+
+option go_package = "github.com/livekit/psrpc/examples/pubsub/protocol/broadcast;broadcast";
+
+import "protocol/protocol.proto";
+
+message BroadCastReq {
+  protocol.Proto proto = 1;
+}
+
+
+message BroadCastReply {
+  string code = 1;
+  string msg = 2;
+  string desc = 3;
+
+}
+
+// 房间广播请求
+message BroadCastRoomReq {
+  string room_id = 1;
+  protocol.Proto proto = 2;
+}
+
+// 房间广播响应
+message BroadCastRoomReply {
+  string code = 1;
+  string msg = 2;
+  string desc = 3;
+}
+
+service PushServer {
+
+  // Broadcast send to every entity
+  rpc Broadcast(BroadCastReq) returns (BroadCastReply);
+
+  // BroadcastToRoom broadcast to specific room
+  rpc BroadcastToRoom(BroadCastRoomReq) returns (BroadCastRoomReply);
+
+}
