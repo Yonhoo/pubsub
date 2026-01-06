@@ -1,7 +1,8 @@
 *.exe
 
-*.md 
 
 
+*.md
 !README.md
-
+!README.MD
+!readme.md
