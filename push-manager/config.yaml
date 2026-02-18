@@ -1,0 +1,38 @@
+# ============================================
+# Push-Manager 配置文件
+# ============================================
+
+# ETCD 配置（服务发现）
+etcd:
+  endpoints:
+    - ${ETCD_ENDPOINTS:localhost:2379}
+  dial_timeout: 5s
+  request_timeout: 10s
+
+# RPC 配置
+rpc:
+  timeout: 10s
+  max_retries: 3
+  retry_interval: 1s
+
+# Logging 配置
+logging:
+  level: info
+  format: json
+  output: stdout
+  file_path: /var/log/pubsub/push-manager.log
+  max_size: 100
+  max_days: 30
+
+# 追踪配置
+tracing:
+  enabled: true
+  exporter_type: jaeger
+  jaeger_endpoint: http://jaeger:14268/api/traces
+  sample_rate: 1.0
+
+# Metrics 配置
+metrics:
+  enabled: true
+  port: 9093
+  path: /metrics

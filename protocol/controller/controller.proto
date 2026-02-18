@@ -1,0 +1,123 @@
+
+
+// Copyright 2023 LiveKit, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package pubsub;
+
+option go_package = "github.com/livekit/psrpc/examples/pubsub/protocol/controller;controller";
+
+// Controller 服务 - 管理 Room 和 User 信息
+service ControllerService {
+
+  // 用户加入房间
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse);
+
+  // 用户离开房间
+  rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse);
+
+  // 获取房间信息（供 Push-Manager 查询）
+  rpc GetRoomInfo(GetRoomInfoRequest) returns (GetRoomInfoResponse);
+
+  // 获取用户所在的 Node（供 Push-Manager 查询）
+  rpc GetUserNode(GetUserNodeRequest) returns (GetUserNodeResponse);
+
+  // 获取房间统计
+  rpc GetRoomStats(GetRoomStatsRequest) returns (GetRoomStatsResponse);
+
+}
+
+// ========== Room Management ==========
+message JoinRoomRequest {
+  string user_id = 1;
+  string room_id = 2;
+  string user_name = 3;
+  string node_id = 4;
+  map<string, string> metadata = 5;
+}
+
+message JoinRoomResponse {
+  bool success = 1;
+  string message = 2;
+  RoomInfo room_info = 3;
+}
+
+message LeaveRoomRequest {
+  string user_id = 1;
+  string room_id = 2;
+}
+
+message LeaveRoomResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetRoomInfoRequest {
+  string room_id = 1;
+}
+
+message GetRoomInfoResponse {
+  RoomInfo room_info = 1;
+}
+
+message GetUserNodeRequest {
+  string user_id = 1;
+}
+
+message GetUserNodeResponse {
+  string node_id = 1;
+  string node_address = 2;
+  bool found = 3;
+  string room_id = 4;  // 用户所在房间
+}
+
+message GetRoomStatsRequest {}
+
+message GetRoomStatsResponse {
+  int32 total_rooms = 1;
+  int32 total_users = 2;
+  repeated RoomStats rooms = 3;
+}
+
+
+// ========== Common Types ==========
+message RoomInfo {
+  string room_id = 1;
+  repeated UserInfo users = 2;
+  RoomMetadata metadata = 3;
+  int64 created_at = 4;
+  int64 updated_at = 5;
+}
+
+message UserInfo {
+  string user_id = 1;
+  string user_name = 2;
+  string node_id = 3;
+  map<string, string> metadata = 4;
+  int64 joined_at = 5;
+}
+
+message RoomMetadata {
+  string name = 1;
+  string description = 2;
+  int32 max_users = 3;
+}
+
+message RoomStats {
+  string room_id = 1;
+  int32 user_count = 2;
+  int64 created_at = 3;
+}

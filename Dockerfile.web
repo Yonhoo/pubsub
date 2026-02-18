@@ -1,0 +1,44 @@
+# Dockerfile for Web Server
+FROM golang:1.25-alpine AS builder
+
+# 安装必要的构建工具
+RUN apk add --no-cache git make
+
+# 设置工作目录
+WORKDIR /app
+
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GO111MODULE=on
+
+# 复制 go.mod 和 go.sum
+COPY go.mod go.sum ./
+
+# 下载依赖
+RUN go mod download
+
+# 复制整个项目（需要 protocol 等依赖）
+COPY . .
+
+# 编译 Web Server
+WORKDIR /app/web
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o web-server main.go
+
+# 最终镜像
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+# 从 builder 复制文件
+COPY --from=builder /app/web/web-server .
+COPY --from=builder /app/web/chat.html .
+COPY --from=builder /app/web/protocol.proto .
+COPY --from=builder /app/web/config.js .
+
+# 暴露端口
+EXPOSE 8086
+
+# 启动服务
+CMD ["./web-server"]
+

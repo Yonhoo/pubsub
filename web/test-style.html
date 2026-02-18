@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>样式测试</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f8f9fa;
+            padding: 20px;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 70%;
+            margin-bottom: 15px;
+        }
+
+        .message.own {
+            align-self: flex-end;
+            align-items: flex-end;
+        }
+
+        .message.other {
+            align-self: flex-start;
+            align-items: flex-start;
+        }
+
+        .message-header {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .message-sender {
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .message-time {
+            color: #999;
+        }
+
+        .message-bubble {
+            padding: 12px 16px;
+            border-radius: 18px;
+            word-wrap: break-word;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .message.own .message-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.other .message-bubble {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.system .message-bubble {
+            background: #fffbea;
+            color: #856404;
+            text-align: center;
+            border-radius: 10px;
+            font-size: 13px;
+            padding: 8px 16px;
+        }
+    </style>
+</head>
+<body>
+    <h1>消息样式测试</h1>
+    
+    <!-- 系统消息 -->
+    <div class="message system">
+        <div class="message-bubble">✅ 成功加入房间: room-001</div>
+    </div>
+
+    <!-- 自己的消息 -->
+    <div class="message own">
+        <div class="message-header">
+            <span class="message-sender">我自己</span>
+            <span class="message-time">14:30</span>
+        </div>
+        <div class="message-bubble">这是我发送的消息，背景是紫色渐变，文字是白色</div>
+    </div>
+
+    <!-- 别人的消息 -->
+    <div class="message other">
+        <div class="message-header">
+            <span class="message-sender">Alice</span>
+            <span class="message-time">14:31</span>
+        </div>
+        <div class="message-bubble">这是别人发送的消息，背景是白色，文字是深色</div>
+    </div>
+
+    <!-- 更多别人的消息 -->
+    <div class="message other">
+        <div class="message-header">
+            <span class="message-sender">Bob</span>
+            <span class="message-time">14:32</span>
+        </div>
+        <div class="message-bubble">大家好！这条消息应该很清晰可见</div>
+    </div>
+
+    <!-- 更多自己的消息 -->
+    <div class="message own">
+        <div class="message-header">
+            <span class="message-sender">我自己</span>
+            <span class="message-time">14:33</span>
+        </div>
+        <div class="message-bubble">再发一条测试消息</div>
+    </div>
+</body>
+</html>
+
+
