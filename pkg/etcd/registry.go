@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -320,14 +321,29 @@ func RegisterEndPointToEtcd(ctx context.Context, serverAddr, serverName string, 
 
 	log.Printf("✅ [RegisterEndPoint] 成功注册: %s -> %s\n", endpointKey, serverAddr)
 
-	// 每隔 5 s进行一次延续租约的动作
+	// 每隔 5 s 进行一次续约；若 lease 不存在（如 etcd 重启），则重新注册
 	for {
 		select {
 		case <-time.After(5 * time.Second):
-			// 续约操作
 			_, err := etcdClient.KeepAliveOnce(ctx, lease.ID)
 			if err != nil {
-				log.Printf("⚠️  [RegisterEndPoint] 续约失败: %v\n", err)
+				if strings.Contains(err.Error(), "lease not found") {
+					// etcd 重启或 lease 过期，重新注册
+					newLease, errGrant := etcdClient.Grant(ctx, ttl)
+					if errGrant != nil {
+						log.Printf("⚠️  [RegisterEndPoint] 重新注册失败(Grant): %v\n", errGrant)
+						continue
+					}
+					errAdd := etcdManager.AddEndpoint(ctx, endpointKey, endpoints.Endpoint{Addr: serverAddr}, eclient.WithLease(newLease.ID))
+					if errAdd != nil {
+						log.Printf("⚠️  [RegisterEndPoint] 重新注册失败(AddEndpoint): %v\n", errAdd)
+						continue
+					}
+					lease = newLease
+					log.Printf("✅ [RegisterEndPoint] 续约失败后已重新注册: %s -> %s\n", endpointKey, serverAddr)
+				} else {
+					log.Printf("⚠️  [RegisterEndPoint] 续约失败: %v\n", err)
+				}
 			}
 		case <-ctx.Done():
 			log.Printf("🛑 [RegisterEndPoint] 停止注册: %s\n", endpointKey)

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -58,6 +59,9 @@ type PushManagerServer struct {
 
 	// Connect-Node 客户端池（nodeID -> *BroadcastClient）
 	broadCastClientMap map[string]*BroadcastClient
+
+	// 队列满丢弃计数（用于分析丢包）
+	queueFullDropCount int64
 
 	// Metrics
 	metrics *metrics.MetricsCollector
@@ -274,8 +278,6 @@ func (bc *BroadcastClient) runWorker(workerID uint64) {
 
 			if err != nil {
 				log.Printf("❌ [Worker-%s-%d] 推送消息失败 (耗时: %v): %v\n", bc.serverID, workerID, elapsed, err)
-			} else {
-				log.Printf("✅ [Worker-%s-%d] 消息推送成功 (耗时: %v)\n", bc.serverID, workerID, elapsed)
 			}
 		}
 	}
@@ -289,14 +291,19 @@ func (s *PushManagerServer) EnqueueBroadcastMsg(req *broadcast.BroadCastReq) {
 		ProtoOp: req.Proto.Op, // 设置 ProtoOp，用于客户端的 NeedPush 检查
 	}
 
-	for nodeID, client := range s.broadCastClientMap {
+	for _, client := range s.broadCastClientMap {
 		select {
 		case client.broadcastChan <- &args:
-			log.Printf("📤 [Push-Manager] 消息已加入队列: %s, op=%d\n", nodeID, args.ProtoOp)
 		default:
-			log.Printf("⚠️  [Push-Manager] 节点 %s 的队列已满，丢弃消息\n", nodeID)
+			atomic.AddInt64(&s.queueFullDropCount, 1)
+			// 不在此处打日志，避免刷屏；累计值由 main 中 10s 周期 stat 打印
 		}
 	}
+}
+
+// GetQueueFullDropCount 返回因队列满而丢弃的消息数（用于排查丢包）
+func (s *PushManagerServer) GetQueueFullDropCount() int64 {
+	return atomic.LoadInt64(&s.queueFullDropCount)
 }
 
 // Close 关闭客户端
@@ -324,9 +331,6 @@ func (s *PushManagerServer) cleanupAllClients() {
 
 // Broadcast 实现 PushServer 的 Broadcast 方法
 func (s *PushManagerServer) Broadcast(ctx context.Context, req *broadcast.BroadCastReq) (*broadcast.BroadCastReply, error) {
-	log.Printf("📡 [Push-Manager] 收到广播请求\n")
-
-	// 将消息加入所有 Connect-Node 的队列
 	s.EnqueueBroadcastMsg(req)
 
 	return &broadcast.BroadCastReply{

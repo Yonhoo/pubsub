@@ -23,6 +23,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strings"
@@ -194,6 +196,30 @@ func main() {
 	listen, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.Port))
 	if err != nil {
 		log.Fatalf("❌ 监听失败: %v\n", err)
+	}
+
+	pprofPort := 6062
+
+	go func() {
+		addr := fmt.Sprintf(":%d", pprofPort)
+		log.Printf("🔬 [Controller-Manager] pprof 已启动: http://localhost:%d/debug/pprof/\n", pprofPort)
+		if err := http.ListenAndServe(addr, nil); err != nil && err != http.ErrServerClosed {
+			log.Printf("⚠️  pprof 服务错误: %v\n", err)
+		}
+	}()
+
+	// 启动 Metrics HTTP 服务（/metrics 供 Prometheus 抓取）
+	metricsPort := 9090
+	if metricsCollector != nil {
+		go func() {
+			addr := fmt.Sprintf(":%d", metricsPort)
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", metricsCollector.Handler())
+			log.Printf("📊 [Controller-Manager] Metrics 已启动: http://localhost:%d/metrics\n", metricsPort)
+			if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
+				log.Printf("⚠️  Metrics 服务错误: %v\n", err)
+			}
+		}()
 	}
 
 	log.Println(strings.Repeat("=", 80))

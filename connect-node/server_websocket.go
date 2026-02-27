@@ -19,12 +19,19 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	maxInt = 1<<31 - 1
 	r      = 0
+)
+
+const (
+	writeBatchSize      = 32
+	writeBatchTimeout   = 500 * time.Millisecond
+	writeBatchQueueSize = 1024
 )
 
 // ProtoResponse Proto 消息的响应结构体
@@ -36,7 +43,7 @@ type ProtoResponse struct {
 }
 
 // sendProtoResponse 发送 Proto 响应给客户端
-func sendProtoResponse(session getty.Session, req *proto.Proto, resp *ProtoResponse) error {
+func (h *ProtoMessageHandler) sendProtoResponse(session getty.Session, req *proto.Proto, resp *ProtoResponse) error {
 	// 序列化响应为 JSON
 	bodyBytes, err := json.Marshal(resp)
 	if err != nil {
@@ -53,13 +60,10 @@ func sendProtoResponse(session getty.Session, req *proto.Proto, resp *ProtoRespo
 		Body:   bodyBytes,
 	}
 
-	_, _, err = session.WritePkg(protoResp, 0)
-	if err != nil {
+	if err = h.writeProto(session, protoResp, "response"); err != nil {
 		wsLog("❌ [ProtoHandler] 发送响应失败: %v", err)
 		return err
 	}
-
-	wsLog("📤 [ProtoHandler] 已发送响应: code=%d, message=%s", resp.Code, resp.Message)
 	return nil
 }
 
@@ -255,9 +259,25 @@ type ProtoMessageHandler struct {
 
 	// 记录最后一次写入时间（用于超时检查）
 	// Getty 的 GetActive() 只在读取时更新，写入不会更新
-	// 所以我们需要单独记录写入时间
-	lastWriteTime time.Time
-	writeTimeMu   sync.RWMutex
+	// 所以我们需要单独记录写入时间（UnixNano）
+	lastWriteTimeNano int64
+
+	batcher *writeBatcher
+
+	// 写入竞争统计（用于定位高并发写锁争用）
+	writeInFlight        int32
+	writeTotal           uint64
+	writeConcurrent      uint64
+	writeLastLogNano     int64
+	writeLastStatLogNano int64
+
+	// Batch 写入验证统计（用于确认 WriteBytesArray 合并发送是否生效）
+	batchEnqueued         uint64
+	batchFlushes          uint64
+	batchFlushedPkgs      uint64
+	batchFlushedBytes     uint64
+	batchMaxPkgsPerFlush  uint32
+	batchLastFlushLogNano int64
 }
 
 // TODO 之前的 server_websocket 是客户端写入的很多消息，一次性合并等所有消息都处理完，拿到 server 的 resp 之后，
@@ -279,12 +299,12 @@ func newProtoMessageHandler(server *ConnectNodeServer, channel *Channel,
 // RemoveHandler 移除并归还 buffer（内部不加锁，由调用者保证线程安全）
 
 func (h *ProtoMessageHandler) OnOpen(session getty.Session) error {
-	wsLog("✅ [ProtoHandler] Session 打开: %s", session.Stat())
 
 	// 初始化写入时间为当前时间（连接建立时）
-	h.writeTimeMu.Lock()
-	h.lastWriteTime = time.Now()
-	h.writeTimeMu.Unlock()
+	atomic.StoreInt64(&h.lastWriteTimeNano, time.Now().UnixNano())
+
+	h.batcher = newWriteBatcher(session, h, h.protoPackageHandler, writeBatchSize, writeBatchTimeout)
+	h.batcher.Start()
 
 	// 启动 dispatchWebsocket 协程处理客户端消息
 	go h.dispatchWebsocket(session)
@@ -300,16 +320,12 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 		finish bool
 	)
 
-	wsLog("🚀 [ProtoHandler] dispatchWebsocket 启动")
-
 	for {
 		// 1. 等待信号（阻塞直到有新消息或关闭）
 		p = h.channel.Ready()
 
 		switch p {
 		case proto.ProtoFinish:
-			wsLog("👋 [ProtoHandler] dispatchWebsocket 收到结束信号 (ProtoFinish)")
-			wsLog("👋 [ProtoHandler] 这通常是因为 OnError 或 OnClose 被调用，导致 channel.Close() 发送了 ProtoFinish 信号")
 			finish = true
 			goto close
 
@@ -327,7 +343,7 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 
 				// 3. 处理消息（根据 op 路由到不同的 handler）
 				if err = h.processClientRequest(session, p); err != nil {
-					wsLog("❌ [ProtoHandler] 处理消息失败: op=%d, seq=%d, err=%v", p.Op, p.Seq, err)
+					wsLog("❌ [ProtoHandler] 处理消息失败: op=%d seq=%d err=%v", p.Op, p.Seq, err)
 				}
 
 				// 4. GetAdv() 推进 rp 指针
@@ -335,26 +351,14 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 
 				// 5. 释放 Buffer（消息处理完成）
 				pwb.Release()
-
-				wsLog("✅ [ProtoHandler] 消息处理完成并释放 Buffer: op=%d, seq=%d, rp++", p.Op, p.Seq)
 			}
 
 		default:
 			// 服务端推送的消息（通过 Broadcast/BroadcastRoom 推送）
-			wsLog("📤 [ProtoHandler] 收到服务端推送消息: op=%d, seq=%d, roomId=%s, bodyLen=%d",
-				p.Op, p.Seq, p.Roomid, len(p.Body))
-
-			// 直接发送给客户端
-			_, _, err := session.WritePkg(p, 0)
-			if err != nil {
-				wsLog("❌ [ProtoHandler] 发送服务端推送消息失败: %v", err)
-				// 如果发送失败，可能是连接已关闭，不需要关闭 channel（OnClose 会处理）
+			if err := h.writeProto(session, p, "broadcast"); err != nil {
+				wsLog("❌ [ProtoHandler] 发送推送消息失败: %v", err)
 			} else {
-				// 更新最后一次写入时间（因为 Getty 的 GetActive() 只在读取时更新）
-				h.writeTimeMu.Lock()
-				h.lastWriteTime = time.Now()
-				h.writeTimeMu.Unlock()
-				wsLog("✅ [ProtoHandler] 服务端推送消息已发送给客户端")
+				h.markWriteTime()
 			}
 		}
 
@@ -362,7 +366,6 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 
 close:
 	if finish {
-		wsLog("🛑 [ProtoHandler] dispatchWebsocket 正常退出")
 		session.Close()
 		h.protoPackageHandler.Close()
 	}
@@ -370,13 +373,8 @@ close:
 
 // processClientRequest 处理客户端请求
 func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *proto.Proto) error {
-	wsLog("📨 [ProtoHandler] 处理客户端消息: op=%d, seq=%d, roomId=%s, userId=%s, bodyLen=%d",
-		p.Op, p.Seq, p.Roomid, p.Userid, len(p.Body))
-
-	// TODO: 根据 op 路由到不同的业务 handler
 	switch p.Op {
 	case 1: // 加入房间
-		wsLog("🏠 [ProtoHandler] 加入房间: roomId=%s, userId=%s", p.Roomid, p.Userid)
 		// 这里可以调用具体的业务逻辑
 
 		// 从 Body 中获取 UserName（客户端发送的 body 是 userName）
@@ -414,126 +412,77 @@ func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *pro
 			Metadata: metadata,        // 显式初始化，避免 nil
 		}
 
-		// 打印构造的 JoinRoomRequest 详情（包括字段长度和 nil 检查）
-		wsLog("🔄 [ProtoHandler] 构造 JoinRoomRequest: RoomId=%q (len=%d), UserId=%q (len=%d), UserName=%q (len=%d), NodeId=%q (len=%d), Metadata=%v (nil=%v)",
-			joinRoomRequest.RoomId, len(joinRoomRequest.RoomId),
-			joinRoomRequest.UserId, len(joinRoomRequest.UserId),
-			joinRoomRequest.UserName, len(joinRoomRequest.UserName),
-			joinRoomRequest.NodeId, len(joinRoomRequest.NodeId),
-			joinRoomRequest.Metadata, joinRoomRequest.Metadata == nil)
-
-		wsLog("🔄 [ProtoHandler] 调用 Controller.JoinRoom...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// 记录调用开始时间
 		startTime := time.Now()
-		wsLog("⏱️  [ProtoHandler] 开始 gRPC 调用: %v", startTime)
-
-		// 在调用前再次验证请求数据
-		wsLog("🔍 [ProtoHandler] 调用前验证: RoomId=%q, UserId=%q, UserName=%q, NodeId=%q",
-			joinRoomRequest.RoomId, joinRoomRequest.UserId, joinRoomRequest.UserName, joinRoomRequest.NodeId)
-
 		resp, err := h.server.controllerClient.JoinRoom(ctx, &joinRoomRequest,
-			grpc.WaitForReady(true)) // 等待连接就绪
-
-		// 记录调用耗时
+			grpc.WaitForReady(true))
 		elapsed := time.Since(startTime)
-		wsLog("⏱️  [ProtoHandler] gRPC 调用完成，耗时: %v", elapsed)
-		if err != nil {
-			// 详细记录错误信息，包括错误类型和堆栈
-			wsLog("❌ [ProtoHandler] join room error: %v", err)
-			wsLog("❌ [ProtoHandler] 错误类型: %T", err)
-			wsLog("❌ [ProtoHandler] 错误详情: %+v", err)
 
+		if err != nil {
+			wsLog("❌ [ProtoHandler] JoinRoom 失败 room=%s user=%s elapsed=%v err=%v", p.Roomid, p.Userid, elapsed, err)
 			// 检查是否是 gRPC 状态错误
 			errorCode := -1
 			errorMessage := "Internal Server Error"
 			errorText := "gRPC 调用失败"
 			if st, ok := status.FromError(err); ok {
-				wsLog("❌ [ProtoHandler] gRPC 状态码: %s, 消息: %s", st.Code(), st.Message())
-				wsLog("❌ [ProtoHandler] gRPC 详情: %v", st.Details())
 				errorMessage = st.Message()
 				errorText = fmt.Sprintf("gRPC 调用失败: %s", st.Message())
 			}
 
 			// 发送错误响应给客户端
 			errorResp := newErrorResponse(errorCode, errorMessage, errorText)
-			if sendErr := sendProtoResponse(session, p, errorResp); sendErr != nil {
+			if sendErr := h.sendProtoResponse(session, p, errorResp); sendErr != nil {
 				return fmt.Errorf("发送错误响应失败: %w", sendErr)
 			}
 
 			return fmt.Errorf("gRPC 调用失败: %w", err)
 		}
 
-		// 检查 JoinRoom 是否成功
 		if resp == nil {
-			wsLog("❌ [ProtoHandler] JoinRoom 响应为空")
 			errorResp := newErrorResponse(-1, "Empty Response", "JoinRoom 响应为空")
-			if sendErr := sendProtoResponse(session, p, errorResp); sendErr != nil {
+			if sendErr := h.sendProtoResponse(session, p, errorResp); sendErr != nil {
 				return fmt.Errorf("发送错误响应失败: %w", sendErr)
 			}
 			return fmt.Errorf("JoinRoom 响应为空")
 		}
 
-		// 检查 Success 字段
 		if !resp.Success {
 			errorMessage := "Join Room Failed"
 			if resp.Message != "" {
 				errorMessage = resp.Message
 			}
-			wsLog("❌ [ProtoHandler] JoinRoom 失败: Success=false, Message=%q", resp.Message)
-
 			// 发送错误响应给客户端
 			errorResp := newErrorResponse(-1, errorMessage, resp.Message)
-			if sendErr := sendProtoResponse(session, p, errorResp); sendErr != nil {
+			if sendErr := h.sendProtoResponse(session, p, errorResp); sendErr != nil {
 				return fmt.Errorf("发送错误响应失败: %w", sendErr)
 			}
 			return fmt.Errorf("JoinRoom 失败: %s", resp.Message)
 		}
 
-		// JoinRoom 成功
-		wsLog("✅ [ProtoHandler] JoinRoom 成功: Success=%v, Message=%q", resp.Success, resp.Message)
+		wsLog("✅ [ProtoHandler] JoinRoom 成功 room=%s user=%s elapsed=%v", p.Roomid, p.Userid, elapsed)
 
-		// 设置 channel 的 Room（关键！用于广播时的房间匹配）
-		// 方案：通过 bucket.ChangeRoom 设置（这会正确维护 room 的引用）
 		bucket := h.server.Bucket(h.channel.Key)
 		if bucket != nil {
 			if err := bucket.ChangeRoom(p.Roomid, h.channel); err != nil {
 				wsLog("❌ [ProtoHandler] 设置 channel.Room 失败: %v", err)
-			} else {
-				wsLog("✅ [ProtoHandler] 已设置 channel.Room: roomId=%s", p.Roomid)
 			}
 		}
 
-		// 加入房间成功后，订阅消息推送操作码
-		// Op=2: OP_SEND_MSG (服务端推送的消息)
 		h.channel.Watch(2)
-		wsLog("✅ [ProtoHandler] 已订阅消息推送: op=2")
 
-		// 发送成功响应给客户端
 		successMessage := "Join Room Success"
 		if resp.Message != "" {
 			successMessage = resp.Message
 		}
 		successResp := newSuccessResponse(successMessage, "成功加入房间")
-
-		// 发送响应
-		wsLog("📤 [ProtoHandler] 发送加入房间成功响应...")
-		if err := sendProtoResponse(session, p, successResp); err != nil {
+		if err := h.sendProtoResponse(session, p, successResp); err != nil {
 			return err
 		}
-		// 更新最后一次写入时间（因为 Getty 的 GetActive() 只在读取时更新）
-		h.writeTimeMu.Lock()
-		h.lastWriteTime = time.Now()
-		h.writeTimeMu.Unlock()
-		wsLog("✅ [ProtoHandler] 加入房间成功响应已发送")
+		h.markWriteTime()
 
 	case 5: // 心跳包
-		// 心跳消息已经在 OnMessage 中立即处理并响应了
-		// 这里不应该再收到心跳消息（因为 OnMessage 中已经 return 了）
-		// 但为了安全，这里也处理一下
-		wsLog("💓 [ProtoHandler] 收到心跳（已在 OnMessage 中处理）: roomId=%s, userId=%s", p.Roomid, p.Userid)
 		return nil
 
 	default:
@@ -545,35 +494,23 @@ func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *pro
 }
 
 func (h *ProtoMessageHandler) OnError(session getty.Session, err error) {
-	wsLog("❌ [ProtoHandler] Session 错误: %s, err=%v", session.Stat(), err)
-	wsLog("❌ [ProtoHandler] OnError 被调用，准备关闭 channel 并通知 dispatchWebsocket 退出")
-
-	// 清理用户（如果已认证）
+	wsLog("❌ [ProtoHandler] Session 错误: %s err=%v", session.RemoteAddr(), err)
 	h.cleanupUser()
-
-	// 通知 dispatchWebsocket 退出
 	h.channel.Close()
-	wsLog("❌ [ProtoHandler] channel.Close() 已调用，ProtoFinish 信号已发送")
-
-	// 归还 ReadBuffer
+	if h.batcher != nil {
+		h.batcher.Stop()
+	}
 	h.protoPackageHandler.Close()
-	wsLog("❌ [ProtoHandler] protoPackageHandler.Close() 已调用")
 }
 
 func (h *ProtoMessageHandler) OnClose(session getty.Session) {
-	wsLog("👋 [ProtoHandler] Session 关闭: %s", session.Stat())
-	wsLog("👋 [ProtoHandler] OnClose 被调用，准备关闭 channel 并通知 dispatchWebsocket 退出")
-
-	// 清理用户（如果已认证）
+	wsLog("👋 [ProtoHandler] Session 关闭: %s", session.RemoteAddr())
 	h.cleanupUser()
-
-	// 通知 dispatchWebsocket 退出
 	h.channel.Close()
-	wsLog("👋 [ProtoHandler] channel.Close() 已调用，ProtoFinish 信号已发送")
-
-	// 归还 ReadBuffer
+	if h.batcher != nil {
+		h.batcher.Stop()
+	}
 	h.protoPackageHandler.Close()
-	wsLog("👋 [ProtoHandler] protoPackageHandler.Close() 已调用")
 }
 
 // cleanupUser 清理用户（调用 Controller.LeaveRoom 并从 Bucket/Room 中移除）
@@ -587,23 +524,15 @@ func (h *ProtoMessageHandler) cleanupUser() {
 	channel := h.channel
 	h.rwlock.RUnlock()
 
-	// 只有已认证的用户才需要清理
 	if !auth || roomId == "" || userId == "" {
-		wsLog("ℹ️  [ProtoHandler] 用户未认证，跳过清理: auth=%v, roomId=%q, userId=%q", auth, roomId, userId)
 		return
 	}
 
-	wsLog("🧹 [ProtoHandler] 开始清理用户: userId=%q, roomId=%q", userId, roomId)
-
-	// 1. 从 Bucket 和 Room 中移除 Channel（内存清理）
 	if bucket != nil && channel != nil {
-		wsLog("🗑️  [ProtoHandler] 从 Bucket 中移除 Channel: userId=%q", userId)
 		bucket.Del(channel)
-		wsLog("✅ [ProtoHandler] Channel 已从 Bucket 和 Room 中移除")
 	}
 
-	// 2. 调用 Controller.LeaveRoom 清理数据库记录
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	leaveRoomRequest := &controller.LeaveRoomRequest{
@@ -611,29 +540,20 @@ func (h *ProtoMessageHandler) cleanupUser() {
 		RoomId: roomId,
 	}
 
-	wsLog("🔄 [ProtoHandler] 调用 Controller.LeaveRoom...")
 	startTime := time.Now()
-
-	// 🔑 添加 WaitForReady 选项
 	resp, err := h.server.controllerClient.LeaveRoom(ctx, leaveRoomRequest,
 		grpc.WaitForReady(true))
-
 	elapsed := time.Since(startTime)
-	wsLog("⏱️  [ProtoHandler] LeaveRoom 调用完成，耗时: %v", elapsed)
+
 	if err != nil {
-		wsLog("❌ [ProtoHandler] LeaveRoom 调用失败: userId=%q, roomId=%q, err=%v", userId, roomId, err)
-		// 即使 LeaveRoom 失败，内存清理已完成，继续执行
+		wsLog("❌ [ProtoHandler] LeaveRoom 失败 user=%s room=%s elapsed=%v err=%v", userId, roomId, elapsed, err)
 		return
 	}
-
 	if resp != nil {
-		wsLog("✅ [ProtoHandler] LeaveRoom 成功: userId=%q, roomId=%q, success=%v, message=%q",
-			userId, roomId, resp.Success, resp.Message)
+		wsLog("✅ [ProtoHandler] LeaveRoom 成功 user=%s room=%s elapsed=%v", userId, roomId, elapsed)
 	} else {
-		wsLog("⚠️  [ProtoHandler] LeaveRoom 返回 nil: userId=%q, roomId=%q", userId, roomId)
+		wsLog("⚠️  [ProtoHandler] LeaveRoom 返回 nil user=%s room=%s", userId, roomId)
 	}
-
-	wsLog("✅ [ProtoHandler] 用户清理完成: userId=%q, roomId=%q", userId, roomId)
 }
 
 func (h *ProtoMessageHandler) authWebsocket(p *proto.Proto, session getty.Session) error {
@@ -650,34 +570,13 @@ func (h *ProtoMessageHandler) authWebsocket(p *proto.Proto, session getty.Sessio
 		// ⚠️ 重要：设置 channel.Key，使用 userId 作为唯一标识
 		// 如果不设置 Key，所有 channel 的 key 都是空字符串，会导致 bucket.Put 时关闭错误的 channel
 		h.channel.Key = p.Userid
-		// 设置 IP 地址（用于统计）
 		if remoteAddr := session.RemoteAddr(); remoteAddr != "" {
 			h.channel.IP = remoteAddr
 		}
 
-		wsLog("🔑 [ProtoHandler] 设置 channel.Key=%s, channel.IP=%s", h.channel.Key, h.channel.IP)
-
-		// 在 Put 之前检查是否已存在相同 key 的 channel
-		oldChannel := h.bucket.Channel(p.Userid)
-		if oldChannel != nil {
-			oldRoomId := ""
-			if oldChannel.Room != nil {
-				oldRoomId = oldChannel.Room.ID
-			}
-			wsLog("⚠️  [ProtoHandler] Put 前检查: 已存在相同 key 的 channel")
-			wsLog("   - 旧 channel: Key=%s, RoomId=%s, IP=%s", oldChannel.Key, oldRoomId, oldChannel.IP)
-			wsLog("   - 新 channel: Key=%s, RoomId=%s, IP=%s", h.channel.Key, p.Roomid, h.channel.IP)
-			wsLog("   - 注意: Put 操作会关闭旧 channel，导致其 dispatchWebsocket 退出")
-		} else {
-			wsLog("✅ [ProtoHandler] Put 前检查: 不存在相同 key 的 channel，可以安全 Put")
-			wsLog("   - 新 channel: Key=%s, RoomId=%s, IP=%s", h.channel.Key, p.Roomid, h.channel.IP)
-		}
-
-		//connectNodeServer := session.GetAttribute("server").(*ConnectNodeServer)
 		h.bucket.Put(p.Roomid, h.channel)
-
 		h.auth = true
-		wsLog("✅ [ProtoHandler] 鉴权成功: roomId=%s, userId=%s", p.Roomid, p.Userid)
+		wsLog("✅ [ProtoHandler] 鉴权成功 room=%s user=%s", p.Roomid, p.Userid)
 		return nil
 	}
 
@@ -694,12 +593,6 @@ func (h *ProtoMessageHandler) OnMessage(session getty.Session, pkg any) {
 
 	p := pwb.Proto
 
-	// 打印收到的原始消息（特别是 op=1 的加入房间消息）
-	if p.Op == 1 {
-		wsLog("📥 [ProtoHandler] 收到 JoinRoom 消息: ver=%d, op=%d, seq=%d, roomId=%s, userId=%s, bodyLen=%d, body=%s",
-			p.Ver, p.Op, p.Seq, p.Roomid, p.Userid, len(p.Body), string(p.Body))
-	}
-
 	// 鉴权检查
 	if !h.auth {
 		err := h.authWebsocket(p, session)
@@ -711,41 +604,20 @@ func (h *ProtoMessageHandler) OnMessage(session getty.Session, pkg any) {
 		}
 	}
 
-	// 心跳消息（op=5）需要立即响应，确保活跃时间更新
-	// 注意：Getty 的 GetActive() 应该在 OnMessage 被调用时已经更新了
-	// 但为了确保，心跳消息立即发送响应
 	if p.Op == 5 {
-		// 记录当前活跃时间（用于调试）
-		activeTime := session.GetActive()
-		wsLog("💓 [ProtoHandler] 收到心跳: roomId=%s, userId=%s, 当前活跃时间: %v",
-			p.Roomid, p.Userid, activeTime)
-
 		resp := &proto.Proto{
 			Ver:    p.Ver,
-			Op:     6, // 心跳响应
+			Op:     6,
 			Seq:    p.Seq,
 			Roomid: p.Roomid,
 			Userid: p.Userid,
 			Body:   nil,
 		}
-		// 立即发送心跳响应，这会触发 Getty 更新活跃时间
-		_, _, err := session.WritePkg(resp, 0)
-		if err != nil {
+		if err := h.writeProto(session, resp, "heartbeat"); err != nil {
 			wsLog("⚠️  [ProtoHandler] 发送心跳响应失败: %v", err)
 		} else {
-			// 更新最后一次写入时间（因为 Getty 的 GetActive() 只在读取时更新）
-			h.writeTimeMu.Lock()
-			h.lastWriteTime = time.Now()
-			h.writeTimeMu.Unlock()
-			// 验证活跃时间是否更新（用于调试）
-			newActiveTime := session.GetActive()
-			if newActiveTime.After(activeTime) {
-				wsLog("✅ [ProtoHandler] 心跳响应已发送，活跃时间已更新: %v -> %v", activeTime, newActiveTime)
-			} else {
-				wsLog("⚠️  [ProtoHandler] 心跳响应已发送，但活跃时间未更新: %v (可能 Getty 只在读取时更新)", activeTime)
-			}
+			h.markWriteTime()
 		}
-		// 心跳消息不需要放入队列，立即释放 Buffer
 		pwb.Release()
 		return
 	}
@@ -770,9 +642,6 @@ func (h *ProtoMessageHandler) OnMessage(session getty.Session, pkg any) {
 	// 4. Signal() 通知 dispatchWebsocket 有新数据
 	h.channel.Signal()
 
-	wsLog("✅ [ProtoHandler] 消息入队: op=%d, seq=%d, roomId=%s, userId=%s, bodyLen=%d",
-		p.Op, p.Seq, p.Roomid, p.Userid, len(p.Body))
-
 	// ⚠️ 注意：此时不能释放 Buffer！
 	// Buffer 会传递给 dispatchWebsocket 协程，处理完后由它负责释放
 }
@@ -783,7 +652,219 @@ func writeResp(session getty.Session, resp *proto.Proto) {
 	}
 }
 
+func (h *ProtoMessageHandler) writeProto(session getty.Session, p *proto.Proto, source string) error {
+	if h.batcher == nil {
+		h.writeTraceStart(source)
+		defer h.writeTraceEnd()
+		_, _, err := session.WritePkg(p, 0)
+		return err
+	}
+	atomic.AddUint64(&h.batchEnqueued, 1)
+	return h.batcher.Enqueue(p)
+}
+
+func (h *ProtoMessageHandler) markWriteTime() {
+	atomic.StoreInt64(&h.lastWriteTimeNano, time.Now().UnixNano())
+}
+
+func (h *ProtoMessageHandler) writeTraceStart(source string) {
+	inFlight := atomic.AddInt32(&h.writeInFlight, 1)
+	atomic.AddUint64(&h.writeTotal, 1)
+
+	if inFlight <= 1 {
+		return
+	}
+	atomic.AddUint64(&h.writeConcurrent, 1)
+
+	// Throttle contention logs to <= 1/s per session.
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&h.writeLastLogNano)
+	if now-last < int64(time.Second) {
+		return
+	}
+	if !atomic.CompareAndSwapInt64(&h.writeLastLogNano, last, now) {
+		return
+	}
+
+	total := atomic.LoadUint64(&h.writeTotal)
+	concurrent := atomic.LoadUint64(&h.writeConcurrent)
+	remote := ""
+	if h.channel != nil {
+		remote = h.channel.IP
+	}
+	wsLog("⚠️  [ProtoHandler] write contention: inFlight=%d source=%s totalWrites=%d concurrentWrites=%d remote=%s",
+		inFlight, source, total, concurrent, remote)
+}
+
+func (h *ProtoMessageHandler) writeTraceEnd() {
+	atomic.AddInt32(&h.writeInFlight, -1)
+}
+
+type writeBatcher struct {
+	session       getty.Session
+	handler       *gettypkg.ProtoPackageHandler
+	owner         *ProtoMessageHandler
+	batchSize     int
+	flushInterval time.Duration
+	in            chan *proto.Proto
+	stop          chan struct{}
+	stopped       int32
+}
+
+func newWriteBatcher(session getty.Session, owner *ProtoMessageHandler, handler *gettypkg.ProtoPackageHandler, batchSize int, flushInterval time.Duration) *writeBatcher {
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	return &writeBatcher{
+		session:       session,
+		owner:         owner,
+		handler:       handler,
+		batchSize:     batchSize,
+		flushInterval: flushInterval,
+		in:            make(chan *proto.Proto, writeBatchQueueSize),
+		stop:          make(chan struct{}),
+	}
+}
+
+func (b *writeBatcher) Start() {
+	go b.loop()
+}
+
+func (b *writeBatcher) Stop() {
+	if atomic.CompareAndSwapInt32(&b.stopped, 0, 1) {
+		close(b.stop)
+	}
+}
+
+func (b *writeBatcher) Enqueue(p *proto.Proto) error {
+	select {
+	case b.in <- p:
+		return nil
+	case <-b.stop:
+		return errors.New("write batcher stopped")
+	}
+}
+
+func (b *writeBatcher) loop() {
+	ticker := time.NewTicker(b.flushInterval)
+	defer ticker.Stop()
+
+	var batch [][]byte
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		pkgs := len(batch)
+		bytes := 0
+		for i := 0; i < pkgs; i++ {
+			bytes += len(batch[i])
+		}
+		if b.owner != nil {
+			b.owner.writeTraceStart("batch")
+		}
+		if _, err := b.session.WriteBytesArray(batch...); err != nil {
+			wsLog("❌ [ProtoHandler] WriteBytesArray failed: %v", err)
+		} else if b.owner != nil {
+			b.owner.markWriteTime()
+			atomic.AddUint64(&b.owner.batchFlushes, 1)
+			atomic.AddUint64(&b.owner.batchFlushedPkgs, uint64(pkgs))
+			atomic.AddUint64(&b.owner.batchFlushedBytes, uint64(bytes))
+
+			// Track max pkgs per flush.
+			for {
+				old := atomic.LoadUint32(&b.owner.batchMaxPkgsPerFlush)
+				if uint32(pkgs) <= old {
+					break
+				}
+				if atomic.CompareAndSwapUint32(&b.owner.batchMaxPkgsPerFlush, old, uint32(pkgs)) {
+					break
+				}
+			}
+
+			// Throttle: log at most once per second per session, and only if we actually flushed >1 pkg.
+			if pkgs > 1 {
+				now := time.Now().UnixNano()
+				last := atomic.LoadInt64(&b.owner.batchLastFlushLogNano)
+				if now-last >= int64(time.Second) && atomic.CompareAndSwapInt64(&b.owner.batchLastFlushLogNano, last, now) {
+					remote := ""
+					if b.owner.channel != nil {
+						remote = b.owner.channel.IP
+					}
+					wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
+				}
+			}
+		}
+		if b.owner != nil {
+			b.owner.writeTraceEnd()
+		}
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case p := <-b.in:
+			if p == nil {
+				continue
+			}
+			data, err := b.handler.Write(b.session, p)
+			if err != nil {
+				wsLog("❌ [ProtoHandler] batch encode failed: %v", err)
+				continue
+			}
+			batch = append(batch, data)
+			if len(batch) >= b.batchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-b.stop:
+			flush()
+			return
+		}
+	}
+}
+
 func (h *ProtoMessageHandler) OnCron(session getty.Session) {
+	// Low-frequency write stats to help correlate CPU profiles with actual write contention.
+	// This is intentionally throttled to avoid adding more lock contention via logging.
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&h.writeLastStatLogNano)
+	if now-last >= int64(10*time.Second) && atomic.CompareAndSwapInt64(&h.writeLastStatLogNano, last, now) {
+		concurrent := atomic.LoadUint64(&h.writeConcurrent)
+		if concurrent != 0 {
+			// Avoid noisy logs per session; only report when we have observed concurrent writes.
+			remote := ""
+			if h.channel != nil {
+				remote = h.channel.IP
+			}
+			wsLog("[stat] ws writes: total=%d concurrent=%d inFlight=%d remote=%s",
+				atomic.LoadUint64(&h.writeTotal),
+				concurrent,
+				atomic.LoadInt32(&h.writeInFlight),
+				remote,
+			)
+		}
+
+		flushes := atomic.LoadUint64(&h.batchFlushes)
+		if flushes != 0 {
+			pkgs := atomic.LoadUint64(&h.batchFlushedPkgs)
+			bytes := atomic.LoadUint64(&h.batchFlushedBytes)
+			enq := atomic.LoadUint64(&h.batchEnqueued)
+			maxPkgs := atomic.LoadUint32(&h.batchMaxPkgsPerFlush)
+			avgPkgs := float64(pkgs) / float64(flushes)
+			remote := ""
+			if h.channel != nil {
+				remote = h.channel.IP
+			}
+			// Only print when batching is meaningfully doing work (avg > 1).
+			if avgPkgs > 1.05 {
+				wsLog("[stat] ws batch: enqueued=%d flushes=%d pkgs=%d avgPkgs=%.2f bytes=%d maxPkgs=%d remote=%s",
+					enq, flushes, pkgs, avgPkgs, bytes, maxPkgs, remote)
+			}
+		}
+	}
+
 	// 使用配置的 session_timeout（默认 180 秒，给心跳留出更多缓冲）
 	timeout := h.server.config.GettyConfig.SessionTimeout
 	if timeout == 0 {
@@ -801,9 +882,11 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 	timeSinceRead := time.Since(readActiveTime)
 
 	// 检查写入活跃时间
-	h.writeTimeMu.RLock()
-	lastWriteTime := h.lastWriteTime
-	h.writeTimeMu.RUnlock()
+	lastWriteNano := atomic.LoadInt64(&h.lastWriteTimeNano)
+	var lastWriteTime time.Time
+	if lastWriteNano > 0 {
+		lastWriteTime = time.Unix(0, lastWriteNano)
+	}
 	timeSinceWrite := time.Since(lastWriteTime)
 
 	// 取两者中较新的时间作为活跃时间
@@ -828,9 +911,5 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 		h.cleanupUser()
 
 		session.Close()
-	} else if timeSinceActive > timeout*2/3 {
-		// 调试日志：记录活跃时间（仅在接近超时时记录）
-		wsLog("⚠️  [ProtoHandler] Session 活跃时间检查: %s (距离上次活跃: %v, 超时阈值: %v, 读取活跃: %v, 写入活跃: %v)",
-			session.RemoteAddr(), timeSinceActive, timeout, readActiveTime, lastWriteTime)
 	}
 }

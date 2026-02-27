@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/etcd"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/metrics"
@@ -125,6 +127,16 @@ func main() {
 		}
 	}()
 
+	pprofPort := 6061
+
+	go func() {
+		addr := fmt.Sprintf(":%d", pprofPort)
+		log.Printf("🔬 [Controller-Manager] pprof 已启动: http://localhost:%d/debug/pprof/\n", pprofPort)
+		if err := http.ListenAndServe(addr, nil); err != nil && err != http.ErrServerClosed {
+			log.Printf("⚠️  pprof 服务错误: %v\n", err)
+		}
+	}()
+
 	log.Println(strings.Repeat("=", 80))
 	log.Println("✅ Push-Manager 运行中")
 	log.Println(strings.Repeat("=", 80))
@@ -147,6 +159,17 @@ func main() {
 	log.Println("🚪 按 Ctrl+C 退出")
 	log.Println(strings.Repeat("=", 80))
 	log.Println()
+
+	// 定期打印队列满丢弃数（便于分析丢包来源）
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if n := pushManager.GetQueueFullDropCount(); n > 0 {
+				log.Printf("[stat] Push-Manager 队列满丢弃: %d", n)
+			}
+		}
+	}()
 
 	// 启动 gRPC Server
 	go func() {

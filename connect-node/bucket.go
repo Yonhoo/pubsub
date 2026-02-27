@@ -170,36 +170,21 @@ func (b *Bucket) Channel(key string) (ch *Channel) {
 }
 
 func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
-	log.Printf("📢 [Bucket] Broadcast 被调用: op=%d, roomId=%s, 总channels=%d", op, p.Roomid, len(b.chs))
-
 	var ch *Channel
-	matchedCount := 0
-	skippedByOp := 0
-	skippedByRoom := 0
 
 	b.cLock.RLock()
 	for _, ch = range b.chs {
 		if !ch.NeedPush(op) {
-			skippedByOp++
 			continue
 		}
-
-		// 只有当 channel 的 room 与消息的 roomId 匹配时才推送
-		// 如果消息没有指定 roomId（空字符串），则广播给所有客户端
 		if p.Roomid != "" && ch.Room != nil && ch.Room.ID != p.Roomid {
-			skippedByRoom++
 			continue
 		}
-
 		if err := ch.Push(p); err != nil {
 			log.Printf("⚠️  [Bucket] Push 失败: err=%v", err)
-		} else {
-			matchedCount++
 		}
 	}
-
 	b.cLock.RUnlock()
-	log.Printf("✅ [Bucket] Broadcast 完成: 成功=%d, 跳过(op不匹配)=%d, 跳过(room不匹配)=%d", matchedCount, skippedByOp, skippedByRoom)
 }
 
 func (b *Bucket) Room(roomId string) (room *Room) {
@@ -217,12 +202,8 @@ func (b *Bucket) DelRoom(room *Room) {
 }
 
 func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) {
-	log.Printf("🔔 [Bucket] BroadcastRoom 被调用: roomID=%s, proto=%+v", arg.RoomID, arg.Proto)
 	num := atomic.AddUint64(&b.routinesNum, 1) % b.c.RoutineAmount
-	log.Printf("🔔 [Bucket] 消息放入 routine %d", num)
-
 	b.routines[num] <- arg
-	log.Printf("🔔 [Bucket] 消息已放入 channel")
 }
 
 func (b *Bucket) Rooms() (res map[string]struct{}) {
@@ -264,12 +245,10 @@ func (b *Bucket) UpRoomsCount(roomCountMap map[string]int32) {
 }
 
 func (b *Bucket) roomprc(c chan *push.BroadcastRoomReq) {
-	
+
 	for {
 		arg := <-c
-		log.Printf("📨 [Bucket] roomprc 收到广播请求: roomID=%s", arg.RoomID)
 		if room := b.Room(arg.RoomID); room != nil {
-			log.Printf("✅ [Bucket] 找到房间，推送消息: roomID=%s", arg.RoomID)
 			room.PushMsg(arg.Proto)
 		} else {
 			log.Printf("❌ [Bucket] 房间不存在: roomID=%s", arg.RoomID)

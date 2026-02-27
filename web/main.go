@@ -93,8 +93,6 @@ func main() {
 			return
 		}
 
-		log.Printf("📡 收到广播请求: room=%s, message=%s", req.RoomID, req.Message)
-
 		// 调用 Push-Manager 广播
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -120,7 +118,6 @@ func main() {
 			return
 		}
 
-		log.Printf("✅ 广播成功")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(BroadcastResponse{
 			Code: "0",
@@ -133,7 +130,7 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
+			"status":  "ok",
 			"service": "web-server",
 		})
 	})
@@ -164,7 +161,7 @@ func main() {
 		// 如果获取可执行文件路径失败，使用当前目录
 		staticDir = "./"
 	}
-	
+
 	log.Printf("📁 静态文件目录: %s", staticDir)
 	fs := http.FileServer(http.Dir(staticDir))
 	mux.Handle("/", fs)
@@ -184,7 +181,7 @@ func main() {
 			h.ServeHTTP(w, r)
 		})
 	}
-	
+
 	log.Printf("🌐 Web 服务器启动: http://localhost:%s", port)
 	log.Printf("")
 	log.Printf("📝 功能:")
@@ -211,5 +208,3 @@ func getEnv(key, defaultValue string) string {
 	}
 	return defaultValue
 }
-
-

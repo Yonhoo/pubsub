@@ -1,0 +1,66 @@
+# Prometheus + Grafana + Node Exporter 监控栈
+# 与主 docker-compose.yml 同机时，接入 pubsub-network 后按服务名抓取
+# 启动顺序：先启动主栈 docker compose up -d，再本栈 docker compose -f monitoring/docker-compose.yml up -d
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: pubsub-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "9096:9090"
+    networks:
+      - pubsub_pubsub-network
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: pubsub-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: 3000
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - pubsub_pubsub-network
+
+  node_exporter:
+    image: prom/node-exporter:v1.6.1
+    container_name: pubsub-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /:/host:ro
+    ports:
+      - "9100:9100"
+    pid: host
+    networks:
+      - pubsub_pubsub-network
+
+networks:
+  pubsub_pubsub-network:
+    external: true
+
+volumes:
+  prometheus_data:
+  grafana_data:

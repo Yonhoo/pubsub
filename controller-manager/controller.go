@@ -91,10 +91,6 @@ func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoo
 		tracing.AttrNodeID.String(req.NodeId),
 	)
 
-	// 打印收到的 JoinRoomRequest 详情（包括字段是否为空）
-	log.Printf("📥 [Controller] 收到 JoinRoomRequest: RoomId=%q (len=%d), UserId=%q (len=%d), UserName=%q (len=%d), NodeId=%q (len=%d), Metadata=%v (nil=%v)\n",
-		req.RoomId, len(req.RoomId), req.UserId, len(req.UserId), req.UserName, len(req.UserName), req.NodeId, len(req.NodeId), req.Metadata, req.Metadata == nil)
-	
 	// 验证必需字段
 	if req.RoomId == "" {
 		return &controller.JoinRoomResponse{Success: false, Message: "room_id 不能为空"}, fmt.Errorf("room_id is empty")
@@ -105,35 +101,22 @@ func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoo
 	if req.NodeId == "" {
 		return &controller.JoinRoomResponse{Success: false, Message: "node_id 不能为空"}, fmt.Errorf("node_id is empty")
 	}
-	
-	log.Printf("👤 [Controller] 用户加入房间: %s -> %s (最大用户数: %d)\n",
-		req.UserName, req.RoomId, s.config.Room.DefaultMaxUsers)
 
 	// 🔥 关键：使用 MySQL 事务保证一致性（支持多 Controller 节点）
 	tracing.AddSpanEvent(ctx, "db_transaction_join_room")
 	err := s.repo.UserJoinRoom(ctx, req.UserId, req.UserName, req.RoomId, req.NodeId, int32(s.config.Room.DefaultMaxUsers))
 	if err != nil {
-		log.Printf("❌ [Controller] 加入房间失败: %v\n", err)
-		log.Printf("❌ [Controller] 错误类型: %T\n", err)
-		log.Printf("❌ [Controller] 错误详情: %+v\n", err)
 		tracing.RecordError(ctx, err)
-
-		// 检查是否是房间已满
-		// 方法1: 检查错误消息中是否包含 "房间已满"（主要方法）
-		// 方法2: 使用 errors.Is 检查 gorm.ErrInvalidData（兼容旧代码）
-		// 方法3: 检查错误消息是否为 "unsupported data"（兼容 GORM 原始错误）
 		errMsg := err.Error()
-		if strings.Contains(errMsg, "房间已满") || 
-		   errors.Is(err, gorm.ErrInvalidData) || 
-		   errMsg == "unsupported data" {
-			log.Printf("✅ [Controller] 检测到房间已满错误，返回友好提示 (错误消息: %q)", errMsg)
+		if strings.Contains(errMsg, "房间已满") ||
+			errors.Is(err, gorm.ErrInvalidData) ||
+			errMsg == "unsupported data" {
 			return &controller.JoinRoomResponse{
 				Success: false,
 				Message: "房间已满",
 			}, nil
 		}
-
-		log.Printf("❌ [Controller] 返回错误响应: %v", err)
+		log.Printf("❌ [Controller] 加入房间失败: %v\n", err)
 		return &controller.JoinRoomResponse{Success: false, Message: err.Error()}, err
 	}
 
@@ -154,7 +137,6 @@ func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoo
 	userCount, _ := s.redis.HLen(ctx, roomUsersKey).Result()
 
 	tracing.AddSpanAttributes(ctx, tracing.AttrUserCount.Int(int(userCount)))
-	log.Printf("✅ [Controller] 用户加入成功: %s, 房间人数: %d\n", req.UserName, userCount)
 
 	// 更新 metrics
 	s.metrics.SetRoomUserCount(req.RoomId, userCount)
@@ -178,7 +160,6 @@ func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoo
 
 // LeaveRoom 用户离开房间
 func (s *ControllerServer) LeaveRoom(ctx context.Context, req *controller.LeaveRoomRequest) (*controller.LeaveRoomResponse, error) {
-	log.Printf("👋 [Controller] 用户离开房间: %s <- %s\n", req.RoomId, req.UserId)
 
 	// 从数据库直接删除记录
 	err := s.repo.UserLeaveRoom(ctx, req.UserId, req.RoomId)
@@ -203,8 +184,6 @@ func (s *ControllerServer) LeaveRoom(ctx context.Context, req *controller.LeaveR
 		s.metrics.SetRoomUserCount(req.RoomId, userCount)
 	}
 	s.metrics.RecordAPIRequest(ctx, "LeaveRoom", true)
-
-	log.Printf("✅ [Controller] 用户离开成功: %s\n", req.UserId)
 	return &controller.LeaveRoomResponse{Success: true, Message: "离开房间成功"}, nil
 }
 
@@ -216,8 +195,6 @@ func (s *ControllerServer) GetRoomInfo(ctx context.Context, req *controller.GetR
 
 	// 如果 Redis 中有数据，直接从缓存返回
 	if err == nil && len(usersData) > 0 {
-		log.Printf("🎯 [Controller] 从缓存获取房间: %s, 用户数: %d\n", req.RoomId, len(usersData))
-
 		// 构建用户列表
 		userInfos := make([]*controller.UserInfo, 0, len(usersData))
 		for userId, userData := range usersData {
@@ -289,8 +266,6 @@ func (s *ControllerServer) GetRoomInfo(ctx context.Context, req *controller.GetR
 		s.redis.Expire(ctx, roomUsersKey, s.config.Room.CacheTTL)
 	}
 
-	log.Printf("📊 [Controller] 房间 %s: %d 人在线（从数据库）\n", req.RoomId, len(users))
-
 	return &controller.GetRoomInfoResponse{
 		RoomInfo: &controller.RoomInfo{
 			RoomId: room.ID, // room.ID 现在是 string 类型
@@ -312,8 +287,6 @@ func (s *ControllerServer) GetUserNode(ctx context.Context, req *controller.GetU
 	defer span.End()
 
 	tracing.AddSpanAttributes(ctx, tracing.AttrUserID.String(req.UserId))
-
-	log.Printf("🔍 [Controller] 查询用户节点: %s\n", req.UserId)
 
 	// 1. 先从 Redis 查询（快速路径）
 	// 查找用户在哪个房间
@@ -343,9 +316,7 @@ func (s *ControllerServer) GetUserNode(ctx context.Context, req *controller.GetU
 
 	// 3. 从 ETCD 或缓存获取节点地址（这里简化，直接返回节点ID）
 	nodeAddress := foundNodeID // 实际应该从 ETCD 获取节点的实际地址
-
-	log.Printf("✅ [Controller] 找到用户: %s (%s) -> node=%s, room=%s\n",
-		foundUserName, req.UserId, foundNodeID, foundRoomID)
+	_ = foundUserName
 
 	s.metrics.RecordAPIRequest(ctx, "GetUserNode", true)
 	tracing.SetSpanSuccess(ctx)

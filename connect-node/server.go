@@ -171,39 +171,30 @@ func (s *ConnectNodeServer) PushMsg(ctx context.Context, req *push.PushMsgReq) (
 }
 
 func (s *ConnectNodeServer) Broadcast(ctx context.Context, req *push.BroadcastReq) (*push.BroadcastReply, error) {
-	log.Printf("📡 [ConnectNodeServer] 收到 Broadcast gRPC 请求: op=%d, roomId=%s", req.ProtoOp, req.GetProto().Roomid)
 	if req.Proto == nil {
 		return nil, pkg.ErrBroadCastArg
 	}
 
-	//go func() {
-	//log.Printf("🚀 [ConnectNodeServer] 开始广播到 %d 个 buckets", len(s.Buckets()))
-	for _, bucket := range s.Buckets() {
-		//channelCount := bucket.ChannelCount()
-		//log.Printf("📤 [ConnectNodeServer] 广播到 bucket[%d], channels=%d", i, channelCount)
-		bucket.Broadcast(req.GetProto(), req.ProtoOp)
-		//if req.Speed > 0 {
-		//	t := bucket.ChannelCount() / int(req.Speed)
-		//	time.Sleep(time.Duration(t) * time.Second)
-		//}
-	}
-	log.Printf("✅ [ConnectNodeServer] Broadcast 完成")
-	//}()
+	go func() {
+		for _, bucket := range s.Buckets() {
+			bucket.Broadcast(req.GetProto(), req.ProtoOp)
+			if req.Speed > 0 {
+				t := bucket.ChannelCount() / int(req.Speed)
+				time.Sleep(time.Duration(t) * time.Second)
+			}
+		}
+	}()
 	return &push.BroadcastReply{}, nil
 }
 
 func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.BroadcastRoomReq) (*push.BroadcastRoomReply, error) {
-	log.Printf("🎯 [ConnectNodeServer] 收到 BroadcastRoom gRPC 请求: roomID=%s", req.RoomID)
 	if req.Proto == nil || req.RoomID == "" {
 		log.Printf("❌ [ConnectNodeServer] 参数无效: roomID=%s, proto=%v", req.RoomID, req.Proto)
 		return nil, pkg.ErrBroadCastRoomArg
 	}
-	log.Printf("🔄 [ConnectNodeServer] 分发到 %d 个 buckets", len(s.Buckets()))
-	for i, bucket := range s.Buckets() {
-		log.Printf("🔄 [ConnectNodeServer] 调用 bucket[%d].BroadcastRoom", i)
+	for _, bucket := range s.Buckets() {
 		bucket.BroadcastRoom(req)
 	}
-	log.Printf("✅ [ConnectNodeServer] BroadcastRoom 处理完成")
 	return &push.BroadcastRoomReply{}, nil
 }
 

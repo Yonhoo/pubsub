@@ -102,6 +102,7 @@ services:
     ports:
       - "50051:50051"
       - "9090:9090"
+      - "6062:6062"
     volumes:
       - ./logs/controller-1:/app/logs  # 挂载日志目录到主机
     depends_on:
@@ -143,6 +144,7 @@ services:
       - "50052:50052"
       - "8083:8083"  # Getty WebSocket (统一使用 8083)
       - "9091:9091"
+      - "6070:6060"
     volumes:
       - ./logs/connect-node-1:/app/logs  # 挂载日志目录到主机
     depends_on:
@@ -182,6 +184,7 @@ services:
       - "50055:50052"
       - "8084:8083"  # Getty WebSocket
       - "9092:9091"
+      - "6071:6060"
     volumes:
       - ./logs/connect-node-2:/app/logs  # 挂载日志目录到主机
     depends_on:
@@ -221,6 +224,7 @@ services:
       - "50056:50052"
       - "8085:8083"  # Getty WebSocket
       - "9094:9091"
+      - "6072:6060"
     volumes:
       - ./logs/connect-node-3:/app/logs  # 挂载日志目录到主机
     depends_on:
@@ -253,6 +257,7 @@ services:
     ports:
       - "50053:50053"
       - "9095:9093"
+      - "6061:6061"
     depends_on:
       etcd:
         condition: service_healthy

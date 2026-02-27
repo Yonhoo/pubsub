@@ -25,8 +25,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
+
+	_ "net/http/pprof"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/etcd"
@@ -37,6 +40,11 @@ import (
 )
 
 func main() {
+
+	runtime.SetMutexProfileFraction(5)
+	runtime.SetBlockProfileRate(1000000)
+	// 开启 mutex/block profile 采样（环境变量控制，默认关闭以避免开销）
+
 	// 初始化全局日志输出到文件
 	logFile := getEnv("CONNECT_NODE_LOG_FILE", "connect-node.log")
 	if err := initGlobalLogger(logFile); err != nil {
@@ -172,6 +180,16 @@ func main() {
 		log.Printf("⚠️  InitWebsocket 服务器错误: %v\n", err)
 		return
 	}
+
+	pprofPort := 6060
+
+	go func() {
+		addr := fmt.Sprintf(":%d", pprofPort)
+		log.Printf("🔬 [Controller-Manager] pprof 已启动: http://localhost:%d/debug/pprof/\n", pprofPort)
+		if err := http.ListenAndServe(addr, nil); err != nil && err != http.ErrServerClosed {
+			log.Printf("⚠️  pprof 服务错误: %v\n", err)
+		}
+	}()
 
 	log.Printf("✅ Connect-Node 启动完成\n")
 	log.Printf("📝 WebSocket 端点: ws://localhost:%d/connect?user_id=xxx&user_name=xxx&room_id=xxx\n", cfg.httpPort)

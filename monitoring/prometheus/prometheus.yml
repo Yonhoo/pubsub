@@ -1,0 +1,47 @@
+# Prometheus 配置：对齐主 docker-compose.yml 服务名与端口
+# 需先创建网络: docker network create pubsub-network（或先启动主 compose）
+# 抓取目标均通过 pubsub-network 按服务名访问
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus 自身
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Node Exporter：宿主机 CPU、内存、磁盘 I/O、网络等
+  - job_name: node
+    static_configs:
+      - targets: ["node_exporter:9100"]
+        labels:
+          instance: host
+
+  # Controller-Manager（主 compose 中服务名为 controller，METRICS_PORT=9090）
+  - job_name: controller-manager
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["controller:9090"]
+        labels:
+          service: controller-manager
+
+  # Connect-Node 共 3 个实例（容器内均为 9091，通过服务名区分）
+  - job_name: connect-node
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "connect-node-1:9091"
+          - "connect-node-2:9091"
+          - "connect-node-3:9091"
+        labels:
+          service: connect-node
+
+  # Push-Manager（主 compose 中服务名 push-manager，METRICS_PORT=9093）
+  - job_name: push-manager
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["push-manager:9093"]
+        labels:
+          service: push-manager
