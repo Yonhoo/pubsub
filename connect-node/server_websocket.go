@@ -93,6 +93,8 @@ var (
 	wsLogger   *log.Logger // WebSocket 专用 logger
 	// CONNECT_NODE_WRITE_TRACE_LOG=1 enables verbose write-tracing logs.
 	enableWriteTraceLog = os.Getenv("CONNECT_NODE_WRITE_TRACE_LOG") == "1"
+	// Monotonic ID used to bind one websocket session to one shared writer shard.
+	sharedWriteSessionSeq uint64
 )
 
 // InitWebsocketLogger 初始化 WebSocket 日志输出到文件
@@ -101,7 +103,7 @@ func InitWebsocketLogger(logFile string) error {
 	var logWriter io.Writer = os.Stdout
 
 	if logFile != "" {
-		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			return fmt.Errorf("failed to open websocket log file %s: %w", logFile, err)
 		}
@@ -264,7 +266,7 @@ type ProtoMessageHandler struct {
 	// 所以我们需要单独记录写入时间（UnixNano）
 	lastWriteTimeNano int64
 
-	batcher *writeBatcher
+	writeSessionID uint64
 
 	// 写入竞争统计（用于定位高并发写锁争用）
 	writeInFlight        int32
@@ -307,8 +309,21 @@ func (h *ProtoMessageHandler) OnOpen(session getty.Session) error {
 	// 初始化写入时间为当前时间（连接建立时）
 	atomic.StoreInt64(&h.lastWriteTimeNano, time.Now().UnixNano())
 
-	h.batcher = newWriteBatcher(session, h, h.protoPackageHandler, writeBatchSize, writeBatchTimeout)
-	h.batcher.Start()
+	h.writeSessionID = atomic.AddUint64(&sharedWriteSessionSeq, 1)
+	if h.server != nil && h.server.sharedWriter != nil {
+		if err := h.server.sharedWriter.Register(h.writeSessionID, session, h.protoPackageHandler, h); err != nil {
+			wsLog("❌ [ProtoHandler] shared writer register failed: %v", err)
+			return err
+		}
+		h.channel.SetServerPushWriter(func(p *proto.Proto) error {
+			// Keep server-side push non-blocking; drop when shard queue is full.
+			if h.server == nil || h.server.sharedWriter == nil || h.writeSessionID == 0 {
+				return fmt.Errorf("shared writer unavailable")
+			}
+			atomic.AddUint64(&h.batchEnqueued, 1)
+			return h.server.sharedWriter.TryEnqueue(h.writeSessionID, p)
+		})
+	}
 
 	// 启动 dispatchWebsocket 协程处理客户端消息
 	go h.dispatchWebsocket(session)
@@ -510,11 +525,14 @@ func (h *ProtoMessageHandler) OnClose(session getty.Session) {
 func (h *ProtoMessageHandler) closeSessionResources() {
 	h.closeOnce.Do(func() {
 		h.cleanupUser()
-		if h.channel != nil {
-			h.channel.Close()
+		if h.server != nil && h.server.sharedWriter != nil && h.writeSessionID != 0 {
+			if err := h.server.sharedWriter.Unregister(h.writeSessionID); err != nil {
+				wsLog("⚠️  [ProtoHandler] shared writer unregister failed: %v", err)
+			}
 		}
-		if h.batcher != nil {
-			h.batcher.Stop()
+		if h.channel != nil {
+			h.channel.ClearServerPushWriter()
+			h.channel.Close()
 		}
 		if h.protoPackageHandler != nil {
 			h.protoPackageHandler.Close()
@@ -662,14 +680,14 @@ func writeResp(session getty.Session, resp *proto.Proto) {
 }
 
 func (h *ProtoMessageHandler) writeProto(session getty.Session, p *proto.Proto, source string) error {
-	if h.batcher == nil {
+	if h.server == nil || h.server.sharedWriter == nil || h.writeSessionID == 0 {
 		h.writeTraceStart(source)
 		defer h.writeTraceEnd()
 		_, _, err := session.WritePkg(p, 0)
 		return err
 	}
 	atomic.AddUint64(&h.batchEnqueued, 1)
-	return h.batcher.Enqueue(p)
+	return h.server.sharedWriter.Enqueue(h.writeSessionID, p)
 }
 
 func (h *ProtoMessageHandler) markWriteTime() {
@@ -709,133 +727,6 @@ func (h *ProtoMessageHandler) writeTraceStart(source string) {
 
 func (h *ProtoMessageHandler) writeTraceEnd() {
 	atomic.AddInt32(&h.writeInFlight, -1)
-}
-
-type writeBatcher struct {
-	session       getty.Session
-	handler       *gettypkg.ProtoPackageHandler
-	owner         *ProtoMessageHandler
-	batchSize     int
-	flushInterval time.Duration
-	in            chan *proto.Proto
-	stop          chan struct{}
-	stopped       int32
-}
-
-func newWriteBatcher(session getty.Session, owner *ProtoMessageHandler, handler *gettypkg.ProtoPackageHandler, batchSize int, flushInterval time.Duration) *writeBatcher {
-	if batchSize <= 0 {
-		batchSize = 1
-	}
-	return &writeBatcher{
-		session:       session,
-		owner:         owner,
-		handler:       handler,
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		in:            make(chan *proto.Proto, writeBatchQueueSize),
-		stop:          make(chan struct{}),
-	}
-}
-
-func (b *writeBatcher) Start() {
-	go b.loop()
-}
-
-func (b *writeBatcher) Stop() {
-	if atomic.CompareAndSwapInt32(&b.stopped, 0, 1) {
-		close(b.stop)
-	}
-}
-
-func (b *writeBatcher) Enqueue(p *proto.Proto) error {
-	select {
-	case b.in <- p:
-		return nil
-	case <-b.stop:
-		return errors.New("write batcher stopped")
-	}
-}
-
-func (b *writeBatcher) loop() {
-	ticker := time.NewTicker(b.flushInterval)
-	defer ticker.Stop()
-
-	var batch [][]byte
-
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		pkgs := len(batch)
-		bytes := 0
-		for i := 0; i < pkgs; i++ {
-			bytes += len(batch[i])
-		}
-		if b.owner != nil {
-			b.owner.writeTraceStart("batch")
-		}
-		if _, err := b.session.WriteBytesArray(batch...); err != nil {
-			wsLog("❌ [ProtoHandler] WriteBytesArray failed: %v", err)
-		} else if b.owner != nil {
-			b.owner.markWriteTime()
-			atomic.AddUint64(&b.owner.batchFlushes, 1)
-			atomic.AddUint64(&b.owner.batchFlushedPkgs, uint64(pkgs))
-			atomic.AddUint64(&b.owner.batchFlushedBytes, uint64(bytes))
-
-			// Track max pkgs per flush.
-			for {
-				old := atomic.LoadUint32(&b.owner.batchMaxPkgsPerFlush)
-				if uint32(pkgs) <= old {
-					break
-				}
-				if atomic.CompareAndSwapUint32(&b.owner.batchMaxPkgsPerFlush, old, uint32(pkgs)) {
-					break
-				}
-			}
-
-			// Throttle: log at most once per second per session, and only if we actually flushed >1 pkg.
-			if pkgs > 1 {
-				now := time.Now().UnixNano()
-				last := atomic.LoadInt64(&b.owner.batchLastFlushLogNano)
-				if now-last >= int64(time.Second) && atomic.CompareAndSwapInt64(&b.owner.batchLastFlushLogNano, last, now) {
-					remote := ""
-					if b.owner.channel != nil {
-						remote = b.owner.channel.IP
-					}
-					if enableWriteTraceLog {
-						wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
-					}
-				}
-			}
-		}
-		if b.owner != nil {
-			b.owner.writeTraceEnd()
-		}
-		batch = batch[:0]
-	}
-
-	for {
-		select {
-		case p := <-b.in:
-			if p == nil {
-				continue
-			}
-			data, err := b.handler.Write(b.session, p)
-			if err != nil {
-				wsLog("❌ [ProtoHandler] batch encode failed: %v", err)
-				continue
-			}
-			batch = append(batch, data)
-			if len(batch) >= b.batchSize {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		case <-b.stop:
-			flush()
-			return
-		}
-	}
 }
 
 func (h *ProtoMessageHandler) OnCron(session getty.Session) {
