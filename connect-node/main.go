@@ -39,6 +39,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const (
+	grpcWriteBufferSize = 256 * 1024
+	grpcReadBufferSize  = 64 * 1024
+)
+
 func main() {
 
 	runtime.SetMutexProfileFraction(5)
@@ -100,7 +105,11 @@ func main() {
 	)
 
 	// 启动 gRPC 服务器（用于接收 Push-Manager 的推送）
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.SharedWriteBuffer(true),
+		grpc.WriteBufferSize(grpcWriteBufferSize),
+		grpc.ReadBufferSize(grpcReadBufferSize),
+	)
 
 	push.RegisterCometServer(grpcServer, connectNodeServer)
 
@@ -212,6 +221,7 @@ func main() {
 	for _, server := range serverList {
 		server.Close()
 	}
+	connectNodeServer.Stop()
 
 	// 关闭 Metrics 服务器
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
@@ -251,7 +261,9 @@ func newLogicClientNonBlocking(c *config.RpcConfig, etcdEndpoints []string) (con
 	conn, err := grpc.Dial(target,
 		grpc.WithResolvers(resolverBuilder),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		// 🔑 关键：添加负载均衡配置，让 Resolver 正常工作
+		grpc.WithSharedWriteBuffer(true),
+		grpc.WithWriteBufferSize(grpcWriteBufferSize),
+		grpc.WithReadBufferSize(grpcReadBufferSize),
 		grpc.WithDefaultServiceConfig(`{
 			"loadBalancingPolicy":"round_robin",
 			"healthCheckConfig": {

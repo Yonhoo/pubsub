@@ -56,6 +56,9 @@ type Channel struct {
 	IP       string
 	watchOps map[int32]struct{}
 	mutex    sync.RWMutex
+	// serverPushWriter routes server-side pushes directly to shared writer shard.
+	// When nil, fallback to legacy signal-queue path.
+	serverPushWriter func(*protocol.Proto) error
 
 	// 统计：本 Channel 的消息丢弃次数
 	dropCount int64
@@ -106,6 +109,33 @@ func (c *Channel) NeedPush(op int32) bool {
 }
 
 func (c *Channel) Push(p *protocol.Proto) (err error) {
+	c.mutex.RLock()
+	pushWriter := c.serverPushWriter
+	c.mutex.RUnlock()
+
+	if pushWriter != nil {
+		if err = pushWriter(p); err == nil {
+			return
+		}
+		// 直写共享写队列失败，按丢弃处理（保持非阻塞语义）
+		dropCount := atomic.AddInt64(&c.dropCount, 1)
+		globalDrop := atomic.AddInt64(&globalSignalDropCount, 1)
+		if dropCount%100 == 1 {
+			dropLog("⚠️  [Channel.Push] Shared writer enqueue failed! Key=%s, Room=%s, Err=%v, DropCount=%d, GlobalDrop=%d",
+				c.Key,
+				func() string {
+					if c.Room != nil {
+						return c.Room.ID
+					}
+					return "nil"
+				}(),
+				err,
+				dropCount,
+				globalDrop)
+		}
+		return
+	}
+
 	select {
 	case c.signal <- p:
 		// 成功推送
@@ -135,6 +165,18 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 	}
 
 	return
+}
+
+func (c *Channel) SetServerPushWriter(writer func(*protocol.Proto) error) {
+	c.mutex.Lock()
+	c.serverPushWriter = writer
+	c.mutex.Unlock()
+}
+
+func (c *Channel) ClearServerPushWriter() {
+	c.mutex.Lock()
+	c.serverPushWriter = nil
+	c.mutex.Unlock()
 }
 
 func (c *Channel) Ready() *protocol.Proto {

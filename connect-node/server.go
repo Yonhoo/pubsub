@@ -22,6 +22,7 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"github.com/zhenjl/cityhash"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
@@ -54,6 +55,14 @@ type ConnectNodeServer struct {
 
 	// 房间同步停止信号
 	stopRoomSync chan struct{}
+
+	// Shared writer for websocket session flush.
+	sharedWriter *sharedWriteManager
+
+	// Shared room broadcast workers (global pool).
+	roomWorkers   []chan *push.BroadcastRoomReq
+	roomWorkerNum uint32
+	stopOnce      sync.Once
 }
 
 // NewConnectNodeServer 创建连接节点服务器
@@ -95,13 +104,71 @@ func NewConnectNodeServer(
 		stopRoomSync:     make(chan struct{}),
 	}
 
+	server.sharedWriter = newSharedWriteManager(
+		0,
+		writeBatchSize,
+		writeBatchMaxBytes,
+		writeBatchTimeout,
+		writeBatchQueueSize,
+	)
+	server.sharedWriter.Start()
+
 	for i := 0; i < cfg.Bucket.Size; i++ {
 		server.buckets[i] = NewBucket(cfg.Bucket)
 	}
+	server.initRoomWorkers(cfg.Bucket.RoutineAmount, cfg.Bucket.RoutineSize)
 
 	go server.onlineproc()
 
 	return server
+}
+
+func (s *ConnectNodeServer) Stop() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		for _, ch := range s.roomWorkers {
+			if ch != nil {
+				close(ch)
+			}
+		}
+		s.roomWorkers = nil
+		s.roomWorkerNum = 0
+		if s.sharedWriter != nil {
+			s.sharedWriter.Stop()
+		}
+	})
+}
+
+func (s *ConnectNodeServer) initRoomWorkers(workerNum uint64, queueSize int) {
+	if workerNum == 0 {
+		workerNum = 1
+	}
+	if queueSize <= 0 {
+		queueSize = 1024
+	}
+
+	s.roomWorkers = make([]chan *push.BroadcastRoomReq, workerNum)
+	s.roomWorkerNum = uint32(workerNum)
+	for i := uint64(0); i < workerNum; i++ {
+		ch := make(chan *push.BroadcastRoomReq, queueSize)
+		s.roomWorkers[i] = ch
+		go s.roomBroadcastProc(ch)
+	}
+}
+
+func (s *ConnectNodeServer) roomBroadcastProc(ch chan *push.BroadcastRoomReq) {
+	for req := range ch {
+		if req == nil || req.Proto == nil || req.RoomID == "" {
+			continue
+		}
+		for _, bucket := range s.Buckets() {
+			if room := bucket.Room(req.RoomID); room != nil {
+				room.PushMsg(req.Proto)
+			}
+		}
+	}
 }
 
 func (s *ConnectNodeServer) Buckets() []*Bucket {
@@ -192,10 +259,23 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 		log.Printf("❌ [ConnectNodeServer] 参数无效: roomID=%s, proto=%v", req.RoomID, req.Proto)
 		return nil, pkg.ErrBroadCastRoomArg
 	}
-	for _, bucket := range s.Buckets() {
-		bucket.BroadcastRoom(req)
+	if len(s.roomWorkers) == 0 || s.roomWorkerNum == 0 {
+		for _, bucket := range s.Buckets() {
+			if room := bucket.Room(req.RoomID); room != nil {
+				room.PushMsg(req.Proto)
+			}
+		}
+		return &push.BroadcastRoomReply{}, nil
 	}
-	return &push.BroadcastRoomReply{}, nil
+
+	idx := cityhash.CityHash32([]byte(req.RoomID), uint32(len(req.RoomID))) % s.roomWorkerNum
+	ch := s.roomWorkers[idx]
+	select {
+	case ch <- req:
+		return &push.BroadcastRoomReply{}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *ConnectNodeServer) Rooms(ctx context.Context, req *push.RoomsReq) (*push.RoomsReply, error) {

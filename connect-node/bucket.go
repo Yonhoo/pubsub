@@ -4,9 +4,8 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
-	"log"
 	"sync"
-	"sync/atomic"
+	"time"
 )
 
 type Bucket struct {
@@ -14,11 +13,12 @@ type Bucket struct {
 	cLock sync.RWMutex        // protect the channels for chs
 	chs   map[string]*Channel // map sub key to a channel
 	// room
-	rooms       map[string]*Room // bucket room channels
-	routines    []chan *push.BroadcastRoomReq
-	routinesNum uint64
+	rooms map[string]*Room // bucket room channels
 
 	ipCnts map[string]int32
+
+	lastPushErrLogNano  int64
+	lastRoomMissLogNano int64
 }
 
 func NewBucket(c *config.BucketConfig) (b *Bucket) {
@@ -28,12 +28,6 @@ func NewBucket(c *config.BucketConfig) (b *Bucket) {
 	b.ipCnts = make(map[string]int32)
 	b.c = c
 	b.rooms = make(map[string]*Room, c.Room)
-	b.routines = make([]chan *push.BroadcastRoomReq, c.RoutineAmount)
-	for i := uint64(0); i < c.RoutineAmount; i++ {
-		c := make(chan *push.BroadcastRoomReq, c.RoutineSize)
-		b.routines[i] = c
-		go b.roomprc(c) // 启动房间广播处理 goroutine
-	}
 	return
 }
 
@@ -171,20 +165,33 @@ func (b *Bucket) Channel(key string) (ch *Channel) {
 
 func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
 	var ch *Channel
+	matchedCount := 0
+	skippedByOp := 0
+	skippedByRoom := 0
 
 	b.cLock.RLock()
 	for _, ch = range b.chs {
 		if !ch.NeedPush(op) {
+			skippedByOp++
 			continue
 		}
+
+		// 只有当 channel 的 room 与消息的 roomId 匹配时才推送
+		// 如果消息没有指定 roomId（空字符串），则广播给所有客户端
 		if p.Roomid != "" && ch.Room != nil && ch.Room.ID != p.Roomid {
+			skippedByRoom++
 			continue
 		}
+
 		if err := ch.Push(p); err != nil {
-			log.Printf("⚠️  [Bucket] Push 失败: err=%v", err)
+			hotLogEvery(&b.lastPushErrLogNano, time.Second, "[Bucket] Push failed: err=%v", err)
+		} else {
+			matchedCount++
 		}
 	}
+
 	b.cLock.RUnlock()
+	hotLogf("[Bucket] Broadcast done: matched=%d skip_op=%d skip_room=%d", matchedCount, skippedByOp, skippedByRoom)
 }
 
 func (b *Bucket) Room(roomId string) (room *Room) {
@@ -202,8 +209,11 @@ func (b *Bucket) DelRoom(room *Room) {
 }
 
 func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) {
-	num := atomic.AddUint64(&b.routinesNum, 1) % b.c.RoutineAmount
-	b.routines[num] <- arg
+	if room := b.Room(arg.RoomID); room != nil {
+		room.PushMsg(arg.Proto)
+	} else {
+		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] Room missing: roomID=%s", arg.RoomID)
+	}
 }
 
 func (b *Bucket) Rooms() (res map[string]struct{}) {
@@ -241,18 +251,5 @@ func (b *Bucket) UpRoomsCount(roomCountMap map[string]int32) {
 	}
 
 	b.cLock.RUnlock()
-
-}
-
-func (b *Bucket) roomprc(c chan *push.BroadcastRoomReq) {
-
-	for {
-		arg := <-c
-		if room := b.Room(arg.RoomID); room != nil {
-			room.PushMsg(arg.Proto)
-		} else {
-			log.Printf("❌ [Bucket] 房间不存在: roomID=%s", arg.RoomID)
-		}
-	}
 
 }

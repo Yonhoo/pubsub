@@ -91,6 +91,8 @@ func newErrorResponse(code int, message string, text string) *ProtoResponse {
 var (
 	serverList []getty.Server
 	wsLogger   *log.Logger // WebSocket 专用 logger
+	// CONNECT_NODE_WRITE_TRACE_LOG=1 enables verbose write-tracing logs.
+	enableWriteTraceLog = os.Getenv("CONNECT_NODE_WRITE_TRACE_LOG") == "1"
 )
 
 // InitWebsocketLogger 初始化 WebSocket 日志输出到文件
@@ -278,6 +280,8 @@ type ProtoMessageHandler struct {
 	batchFlushedBytes     uint64
 	batchMaxPkgsPerFlush  uint32
 	batchLastFlushLogNano int64
+
+	closeOnce sync.Once
 }
 
 // TODO 之前的 server_websocket 是客户端写入的很多消息，一次性合并等所有消息都处理完，拿到 server 的 resp 之后，
@@ -367,7 +371,7 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 close:
 	if finish {
 		session.Close()
-		h.protoPackageHandler.Close()
+		//h.protoPackageHandler.Close()
 	}
 }
 
@@ -495,22 +499,27 @@ func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *pro
 
 func (h *ProtoMessageHandler) OnError(session getty.Session, err error) {
 	wsLog("❌ [ProtoHandler] Session 错误: %s err=%v", session.RemoteAddr(), err)
-	h.cleanupUser()
-	h.channel.Close()
-	if h.batcher != nil {
-		h.batcher.Stop()
-	}
-	h.protoPackageHandler.Close()
+	h.closeSessionResources()
 }
 
 func (h *ProtoMessageHandler) OnClose(session getty.Session) {
 	wsLog("👋 [ProtoHandler] Session 关闭: %s", session.RemoteAddr())
-	h.cleanupUser()
-	h.channel.Close()
-	if h.batcher != nil {
-		h.batcher.Stop()
-	}
-	h.protoPackageHandler.Close()
+	h.closeSessionResources()
+}
+
+func (h *ProtoMessageHandler) closeSessionResources() {
+	h.closeOnce.Do(func() {
+		h.cleanupUser()
+		if h.channel != nil {
+			h.channel.Close()
+		}
+		if h.batcher != nil {
+			h.batcher.Stop()
+		}
+		if h.protoPackageHandler != nil {
+			h.protoPackageHandler.Close()
+		}
+	})
 }
 
 // cleanupUser 清理用户（调用 Controller.LeaveRoom 并从 Bucket/Room 中移除）
@@ -692,8 +701,10 @@ func (h *ProtoMessageHandler) writeTraceStart(source string) {
 	if h.channel != nil {
 		remote = h.channel.IP
 	}
-	wsLog("⚠️  [ProtoHandler] write contention: inFlight=%d source=%s totalWrites=%d concurrentWrites=%d remote=%s",
-		inFlight, source, total, concurrent, remote)
+	if enableWriteTraceLog {
+		wsLog("⚠️  [ProtoHandler] write contention: inFlight=%d source=%s totalWrites=%d concurrentWrites=%d remote=%s",
+			inFlight, source, total, concurrent, remote)
+	}
 }
 
 func (h *ProtoMessageHandler) writeTraceEnd() {
@@ -791,7 +802,9 @@ func (b *writeBatcher) loop() {
 					if b.owner.channel != nil {
 						remote = b.owner.channel.IP
 					}
-					wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
+					if enableWriteTraceLog {
+						wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
+					}
 				}
 			}
 		}
@@ -832,7 +845,7 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 	last := atomic.LoadInt64(&h.writeLastStatLogNano)
 	if now-last >= int64(10*time.Second) && atomic.CompareAndSwapInt64(&h.writeLastStatLogNano, last, now) {
 		concurrent := atomic.LoadUint64(&h.writeConcurrent)
-		if concurrent != 0 {
+		if concurrent != 0 && enableWriteTraceLog {
 			// Avoid noisy logs per session; only report when we have observed concurrent writes.
 			remote := ""
 			if h.channel != nil {
@@ -847,7 +860,7 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 		}
 
 		flushes := atomic.LoadUint64(&h.batchFlushes)
-		if flushes != 0 {
+		if flushes != 0 && enableWriteTraceLog {
 			pkgs := atomic.LoadUint64(&h.batchFlushedPkgs)
 			bytes := atomic.LoadUint64(&h.batchFlushedBytes)
 			enq := atomic.LoadUint64(&h.batchEnqueued)
@@ -908,7 +921,7 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 			session.RemoteAddr(), timeout, timeSinceActive, readActiveTime, lastWriteTime)
 
 		// 清理用户（如果已认证）
-		h.cleanupUser()
+		//h.cleanupUser()
 
 		session.Close()
 	}
