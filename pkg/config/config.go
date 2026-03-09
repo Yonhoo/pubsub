@@ -82,11 +82,12 @@ type RpcConfig struct {
 }
 
 type BucketConfig struct {
-	Size          int
-	Channel       int
-	Room          int
-	RoutineAmount uint64
-	RoutineSize   int
+	Size                       int
+	Channel                    int
+	Room                       int
+	RoutineAmount              uint64
+	RoutineSize                int
+	RoutineBackpressureTimeout time.Duration
 }
 
 type Protocol struct {
@@ -193,11 +194,12 @@ func LoadConfigFromFile(filename string) *Config {
 			TimeOut: getEnvOrYAMLDuration(yamlCfg, "RPC_TIMEOUT_SECONDS", "rpc.timeout", 10*time.Second),
 		},
 		Bucket: &BucketConfig{
-			Size:          getEnvOrYAMLInt(yamlCfg, "BUCKET_SIZE", "bucket.size", 32),
-			Channel:       getEnvOrYAMLInt(yamlCfg, "BUCKET_CHANNEL", "bucket.channel", 1024),
-			Room:          getEnvOrYAMLInt(yamlCfg, "BUCKET_ROOM", "bucket.room", 1024),
-			RoutineAmount: uint64(getEnvOrYAMLInt(yamlCfg, "BUCKET_ROUTINE_AMOUNT", "bucket.routine_amount", 32)),
-			RoutineSize:   getEnvOrYAMLInt(yamlCfg, "BUCKET_ROUTINE_SIZE", "bucket.routine_size", 1024),
+			Size:                       getEnvOrYAMLInt(yamlCfg, "BUCKET_SIZE", "bucket.size", 32),
+			Channel:                    getEnvOrYAMLInt(yamlCfg, "BUCKET_CHANNEL", "bucket.channel", 1024),
+			Room:                       getEnvOrYAMLInt(yamlCfg, "BUCKET_ROOM", "bucket.room", 1024),
+			RoutineAmount:              uint64(getEnvOrYAMLInt(yamlCfg, "BUCKET_ROUTINE_AMOUNT", "bucket.routine_amount", 32)),
+			RoutineSize:                getEnvOrYAMLInt(yamlCfg, "BUCKET_ROUTINE_SIZE", "bucket.routine_size", 1024),
+			RoutineBackpressureTimeout: getEnvOrYAMLDuration(yamlCfg, "BUCKET_ROUTINE_BACKPRESSURE_TIMEOUT", "bucket.routine_backpressure_timeout", 200*time.Millisecond),
 		},
 		TCPConfig: &TcpConfig{
 			Bind:         []string{getEnvOrYAMLStr(yamlCfg, "TCP_BIND", "tcp.bind[0]", "0.0.0.0:50052")},

@@ -37,6 +37,9 @@ bucket:
   size: 32
   channel: 10240  # 增加到 10240（原来 1024）
   room: 1024
+  routine_amount: 64
+  routine_size: 2048
+  routine_backpressure_timeout: 200ms
 
 # Protocol 配置
 protocol:

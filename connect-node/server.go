@@ -16,11 +16,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	getty "github.com/AlexStocks/getty/transport"
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/controller"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"github.com/zhenjl/cityhash"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"log"
 	"sync"
 	"time"
@@ -60,9 +63,10 @@ type ConnectNodeServer struct {
 	sharedWriter *sharedWriteManager
 
 	// Shared room broadcast workers (global pool).
-	roomWorkers   []chan *push.BroadcastRoomReq
-	roomWorkerNum uint32
-	stopOnce      sync.Once
+	roomWorkers              []chan *push.BroadcastRoomReq
+	roomWorkerNum            uint32
+	roomWorkerEnqueueTimeout time.Duration
+	stopOnce                 sync.Once
 }
 
 // NewConnectNodeServer 创建连接节点服务器
@@ -92,16 +96,22 @@ func NewConnectNodeServer(
 		log.Printf("⚠️  [ConnectNodeServer] 使用默认 nodeID: %s", finalNodeID)
 	}
 
+	roomWorkerEnqueueTimeout := cfg.Bucket.RoutineBackpressureTimeout
+	if roomWorkerEnqueueTimeout <= 0 {
+		roomWorkerEnqueueTimeout = 200 * time.Millisecond
+	}
+
 	server := &ConnectNodeServer{
-		nodeID:           finalNodeID, // 使用确定后的 nodeID
-		nodeAddress:      nodeAddress,
-		config:           cfg,
-		controllerClient: controllerClient,
-		metrics:          metricsCollector,
-		buckets:          make([]*Bucket, cfg.Bucket.Size),
-		bucketIdx:        uint32(cfg.Bucket.Size),
-		round:            NewRound(cfg),
-		stopRoomSync:     make(chan struct{}),
+		nodeID:                   finalNodeID, // 使用确定后的 nodeID
+		nodeAddress:              nodeAddress,
+		config:                   cfg,
+		controllerClient:         controllerClient,
+		metrics:                  metricsCollector,
+		buckets:                  make([]*Bucket, cfg.Bucket.Size),
+		bucketIdx:                uint32(cfg.Bucket.Size),
+		round:                    NewRound(cfg),
+		roomWorkerEnqueueTimeout: roomWorkerEnqueueTimeout,
+		stopRoomSync:             make(chan struct{}),
 	}
 
 	server.sharedWriter = newSharedWriteManager(
@@ -256,7 +266,7 @@ func (s *ConnectNodeServer) Broadcast(ctx context.Context, req *push.BroadcastRe
 
 func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.BroadcastRoomReq) (*push.BroadcastRoomReply, error) {
 	if req.Proto == nil || req.RoomID == "" {
-		log.Printf("❌ [ConnectNodeServer] 参数无效: roomID=%s, proto=%v", req.RoomID, req.Proto)
+		log.Printf("[ConnectNodeServer] invalid args: roomID=%s, proto=%v", req.RoomID, req.Proto)
 		return nil, pkg.ErrBroadCastRoomArg
 	}
 	if len(s.roomWorkers) == 0 || s.roomWorkerNum == 0 {
@@ -270,11 +280,22 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 
 	idx := cityhash.CityHash32([]byte(req.RoomID), uint32(len(req.RoomID))) % s.roomWorkerNum
 	ch := s.roomWorkers[idx]
+
+	enqueueCtx := ctx
+	if s.roomWorkerEnqueueTimeout > 0 {
+		var cancel context.CancelFunc
+		enqueueCtx, cancel = context.WithTimeout(ctx, s.roomWorkerEnqueueTimeout)
+		defer cancel()
+	}
+
 	select {
 	case ch <- req:
 		return &push.BroadcastRoomReply{}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-enqueueCtx.Done():
+		if errors.Is(enqueueCtx.Err(), context.DeadlineExceeded) {
+			return nil, status.Error(codes.ResourceExhausted, "room broadcast queue overloaded")
+		}
+		return nil, enqueueCtx.Err()
 	}
 }
 

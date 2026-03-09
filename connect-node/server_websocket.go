@@ -95,6 +95,8 @@ var (
 	enableWriteTraceLog = os.Getenv("CONNECT_NODE_WRITE_TRACE_LOG") == "1"
 	// Monotonic ID used to bind one websocket session to one shared writer shard.
 	sharedWriteSessionSeq uint64
+	// Monotonic ID used for round-robin selection of round reader/writer pools.
+	roundSessionSeq uint64
 )
 
 // InitWebsocketLogger 初始化 WebSocket 日志输出到文件
@@ -131,7 +133,6 @@ func InitWebsocket(server *ConnectNodeServer, addrs []string, accept int) (err e
 		var (
 			flag1, flag2 bool
 			tcpConn      *net.TCPConn
-			r            int
 		)
 
 		_, flag1 = session.Conn().(*tls.Conn)
@@ -165,8 +166,9 @@ func InitWebsocket(server *ConnectNodeServer, addrs []string, accept int) (err e
 
 		// 从 round 获取 pool
 		//tr := server.round.Timer(r)
-		rp := server.round.Reader(r)
-		wp := server.round.Writer(r)
+		roundIdx := int(atomic.AddUint64(&roundSessionSeq, 1) - 1)
+		rp := server.round.Reader(roundIdx)
+		wp := server.round.Writer(roundIdx)
 
 		// new session 的时候 ，确定好 对应 bucket， 创建 channel，初始化 上下文 ctx
 
@@ -199,7 +201,6 @@ func InitWebsocket(server *ConnectNodeServer, addrs []string, accept int) (err e
 		session.SetCronPeriod((int)(server.config.GettyConfig.HeartbeatPeriod.Nanoseconds() / 1e6))
 		session.SetWaitTime(server.config.GettyConfig.GettySessionParam.WaitTimeout)
 
-		r = r + 1
 		// 将 handler 存储到 message handler 中，以便在关闭时归还 buffer
 		//protoMsgHandler.StoreHandler(session, protoPkgHandler, server)
 
