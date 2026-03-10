@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
@@ -94,4 +95,40 @@ func BenchmarkDelRoomReuseBucket(b *testing.B) {
 		bucket.cLock.Unlock()
 		bucket.DelRoom(room)
 	}
+}
+
+// BenchmarkDelRoomContention exercises read/write contention on Bucket.cLock.
+func BenchmarkDelRoomContention(b *testing.B) {
+	bucket := newTestBucket()
+	rooms := make([]*Room, 64)
+	for i := range rooms {
+		room := NewRoom("bench-room-contention-" + string(rune('a'+(i%26))) + string(rune('A'+(i/26))))
+		rooms[i] = room
+		bucket.cLock.Lock()
+		bucket.rooms[room.ID] = room
+		bucket.cLock.Unlock()
+	}
+
+	var counter uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			idx := atomic.AddUint64(&counter, 1)
+			room := rooms[idx%uint64(len(rooms))]
+
+			// Bias toward readers while still forcing regular write contention.
+			if idx%8 == 0 {
+				bucket.cLock.Lock()
+				bucket.rooms[room.ID] = room
+				bucket.cLock.Unlock()
+				bucket.DelRoom(room)
+				continue
+			}
+
+			_ = bucket.Room(room.ID)
+			_ = bucket.RoomsCount()
+		}
+	})
 }
