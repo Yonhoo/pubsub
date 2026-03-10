@@ -1,6 +1,6 @@
 # Story 1.2: Signal 非阻塞化与丢弃计数
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,21 +19,21 @@ so that 高并发时不会因信号阻塞拖垮处理链路。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 改造 `Signal()` 为非阻塞通知（AC: #1, #4）
-  - [ ] Subtask 1.1: 使用 `select { case ...: default: }` 消除阻塞发送
-  - [ ] Subtask 1.2: 保持 dispatch 侧“取空 ring 才休眠”的现有语义不变
+- [x] Task 1: 改造 `Signal()` 为非阻塞通知（AC: #1, #4）
+  - [x] Subtask 1.1: 使用 `select { case ...: default: }` 消除阻塞发送
+  - [x] Subtask 1.2: 保持 dispatch 侧“取空 ring 才休眠”的现有语义不变
 
-- [ ] Task 2: 增加 signal drop 计数（AC: #2）
-  - [ ] Subtask 2.1: 提供全局/按 channel 可读取的 signal drop 计数
-  - [ ] Subtask 2.2: 不再混用业务 push 丢弃与 signal 丢弃统计
+- [x] Task 2: 增加 signal drop 计数（AC: #2）
+  - [x] Subtask 2.1: 提供全局/按 channel 可读取的 signal drop 计数
+  - [x] Subtask 2.2: 不再混用业务 push 丢弃与 signal 丢弃统计
 
-- [ ] Task 3: 增加语义回归测试（AC: #3)
-  - [ ] Subtask 3.1: 验证 signal 满时不会阻塞
-  - [ ] Subtask 3.2: 验证丢失重复 ready 信号后，ring 中请求仍可被完整消费
+- [x] Task 3: 增加语义回归测试（AC: #3)
+  - [x] Subtask 3.1: 验证 signal 满时不会阻塞
+  - [x] Subtask 3.2: 验证丢失重复 ready 信号后，ring 中请求仍可被完整消费
 
-- [ ] Task 4: 执行验证并更新状态
-  - [ ] Subtask 4.1: 运行 `go test ./connect-node/...`
-  - [ ] Subtask 4.2: 运行 `go test -race ./connect-node/...`
+- [x] Task 4: 执行验证并更新状态
+  - [x] Subtask 4.1: 运行 `go test ./connect-node/...`
+  - [x] Subtask 4.2: 运行 `go test -race ./connect-node/...`
 
 ## Dev Notes
 
@@ -61,11 +61,17 @@ Amelia-context / create-story
 
 ### Debug Log References
 
-- 待开发阶段填充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.035s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.038s`
 
 ### Completion Notes List
 
-- 待开发阶段填充
+- `Signal()` 已改为非阻塞 ready 通知；signal 满时直接返回，不再阻塞调用链。
+- signal drop 计数已与业务 `Push` 丢弃计数拆分，新增 per-channel / global 可读接口。
+- 新增 `channel_test.go`，覆盖“signal 满不阻塞”与“ready 合并不丢 ring 中请求”两个关键语义。
+- 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
 
 ### File List
 
@@ -75,3 +81,4 @@ Amelia-context / create-story
 ## Change Log
 
 - 2026-03-10: 创建 Story 1.2 开发上下文，状态设为 `ready-for-dev`。
+- 2026-03-10: 完成 `Signal` 非阻塞化、signal drop 计数拆分与回归测试，状态更新为 `review`。
