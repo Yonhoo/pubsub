@@ -1,6 +1,6 @@
 # Story 1.2: Signal 非阻塞化与丢弃计数
 
-Status: review
+Status: in-progress
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -82,3 +82,29 @@ Amelia-context / create-story
 
 - 2026-03-10: 创建 Story 1.2 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-10: 完成 `Signal` 非阻塞化、signal drop 计数拆分与回归测试，状态更新为 `review`。
+- 2026-03-10: 执行 `/bmad-bmm-code-review`，发现阻塞级问题，状态回退为 `in-progress`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Changes Requested
+
+### Review Date
+
+2026-03-10
+
+### Findings (Severity Ordered)
+
+- High: `Signal()` 在 `c.signal` 已被广播消息占用时直接丢弃 ready，会导致 `ClientReqQueue` 中已入队请求缺少后续唤醒，可能一直滞留到下一次偶发 signal/broadcast 才被处理，违反 AC #3。相关位置：`/mnt/pubsub/connect-node/channel.go`、`/mnt/pubsub/connect-node/server_websocket.go`。
+
+### Blocking Issues
+
+- `Signal` 的“允许合并”只在已有 `ProtoReady` 待消费时成立；当前实现把“任意通道占用”都视为可合并，遗漏了 `ProtoReady` 与广播/finish 共用同一信号通道的语义差异。
+
+### Recommended Fix Direction
+
+- 将 `Signal` 的非阻塞语义与“是否已有 ready 待处理”解耦，避免在通道仅被广播消息占用时丢失唯一 ready。
+- 可选方向：
+  - 为 ready 建立独立的待处理标记/单独通道；
+  - 或在 dispatch 处理完非-ready 消息后补检查 `ClientReqQueue`，确保不会因 ready 丢弃而饿死队列。
