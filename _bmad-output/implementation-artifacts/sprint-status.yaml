@@ -1,0 +1,63 @@
+# generated: 2026-03-09
+# project: pubsub
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: /mnt/pubsub/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+generated: 2026-03-09
+project: pubsub
+project_key: NOKEY
+tracking_system: file-system
+story_location: /mnt/pubsub/_bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-1-fix-delroom-lock-semantics: done
+  1-2-non-blocking-signal-and-drop-counter: ready-for-dev
+  1-3-idempotent-close-guard: backlog
+  1-4-concurrency-baseline-regression-pack: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-unify-shared-writer-path: backlog
+  2-2-validate-three-flush-triggers: backlog
+  2-3-broadcast-snapshot-and-unlock-push: backlog
+  2-4-queue-full-failure-semantics-and-observability: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-preserve-sync-join-semantics: backlog
+  3-2-async-leave-queue-and-dedup: backlog
+  3-3-leave-retry-and-alerting: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-dual-channel-config-for-capacity-params: backlog
+  4-2-profiling-toggle-strategy: backlog
+  4-3-unified-critical-metrics-export: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-phase-canary-template: backlog
+  5-2-rollback-criteria-and-runbook: backlog
+  5-3-phase-gate-and-acceptance-record: backlog
+  5-4-adr-drift-detection-and-writeback: backlog
+  epic-5-retrospective: optional
