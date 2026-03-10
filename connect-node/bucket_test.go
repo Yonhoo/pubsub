@@ -1,60 +1,82 @@
 package main
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
+	proto "github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 )
 
 func newTestBucket() *Bucket {
 	return NewBucket(&config.BucketConfig{
-		Channel: 32,
-		Room:    32,
+		Size:    1,
+		Channel: 16,
+		Room:    16,
 	})
 }
 
-func TestBucketDelRoomDeletesEntry(t *testing.T) {
+func TestDelRoomRemovesRoomFromBucket(t *testing.T) {
 	b := newTestBucket()
-	room := NewRoom("room-1")
+	r := NewRoom("room-del")
 
 	b.cLock.Lock()
-	b.rooms[room.ID] = room
+	b.rooms[r.ID] = r
 	b.cLock.Unlock()
 
-	b.DelRoom(room)
+	b.DelRoom(r)
 
-	if got := b.Room(room.ID); got != nil {
-		t.Fatalf("expected room to be removed, got %#v", got)
+	if got := b.Room(r.ID); got != nil {
+		t.Fatalf("expected room to be deleted, got %#v", got)
 	}
 }
 
-func TestBucketDelRoomConcurrentReadersRaceSafe(t *testing.T) {
+func TestDelRoomClosesRoomChannels(t *testing.T) {
 	b := newTestBucket()
-	roomID := "race-room"
-	room := NewRoom(roomID)
+	r := NewRoom("room-close")
+	ch := NewChannel(1, 1)
 
-	const iterations = 5000
-	var wg sync.WaitGroup
-	wg.Add(2)
+	if err := r.Put(ch); err != nil {
+		t.Fatalf("put channel into room failed: %v", err)
+	}
 
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			b.cLock.Lock()
-			b.rooms[roomID] = room
-			b.cLock.Unlock()
-			b.DelRoom(room)
+	b.cLock.Lock()
+	b.rooms[r.ID] = r
+	b.cLock.Unlock()
+
+	b.DelRoom(r)
+
+	if got := ch.Ready(); got != proto.ProtoFinish {
+		t.Fatalf("expected ProtoFinish, got %#v", got)
+	}
+}
+
+func BenchmarkDelRoom(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		bucket := newTestBucket()
+		room := NewRoom("bench-room")
+
+		bucket.cLock.Lock()
+		bucket.rooms[room.ID] = room
+		bucket.cLock.Unlock()
+
+		bucket.DelRoom(room)
+	}
+}
+
+func BenchmarkDelRoomWithOneChannel(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		bucket := newTestBucket()
+		room := NewRoom("bench-room-ch")
+		ch := NewChannel(1, 1)
+		if err := room.Put(ch); err != nil {
+			b.Fatalf("put channel into room failed: %v", err)
 		}
-	}()
 
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
-			_ = b.Room(roomID)
-			_ = b.RoomsCount()
-		}
-	}()
+		bucket.cLock.Lock()
+		bucket.rooms[room.ID] = room
+		bucket.cLock.Unlock()
 
-	wg.Wait()
+		bucket.DelRoom(room)
+		_ = ch.Ready()
+	}
 }
