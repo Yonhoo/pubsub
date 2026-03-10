@@ -202,9 +202,9 @@ func (b *Bucket) Room(roomId string) (room *Room) {
 }
 
 func (b *Bucket) DelRoom(room *Room) {
-	b.cLock.RLock()
+	b.cLock.Lock()
 	delete(b.rooms, room.ID)
-	b.cLock.RUnlock()
+	b.cLock.Unlock()
 	room.Close()
 }
 
