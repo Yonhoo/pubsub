@@ -11,7 +11,9 @@ import (
 )
 
 var (
-	// 全局统计：signal channel 满导致的消息丢弃次数
+	// 全局统计：业务 push 因非阻塞语义被丢弃的次数
+	globalPushDropCount int64
+	// 全局统计：ready signal 因通道已满被合并的次数
 	globalSignalDropCount int64
 	// 丢弃日志专用 logger
 	dropLogger *log.Logger
@@ -60,8 +62,10 @@ type Channel struct {
 	// When nil, fallback to legacy signal-queue path.
 	serverPushWriter func(*protocol.Proto) error
 
-	// 统计：本 Channel 的消息丢弃次数
-	dropCount int64
+	// 统计：本 Channel 的业务 push 丢弃次数
+	pushDropCount int64
+	// 统计：本 Channel 的 ready signal 丢弃次数
+	signalDropCount int64
 }
 
 func NewChannel(cli, svr int) *Channel {
@@ -118,8 +122,8 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 			return
 		}
 		// 直写共享写队列失败，按丢弃处理（保持非阻塞语义）
-		dropCount := atomic.AddInt64(&c.dropCount, 1)
-		globalDrop := atomic.AddInt64(&globalSignalDropCount, 1)
+		dropCount := atomic.AddInt64(&c.pushDropCount, 1)
+		globalDrop := atomic.AddInt64(&globalPushDropCount, 1)
 		if dropCount%100 == 1 {
 			dropLog("⚠️  [Channel.Push] Shared writer enqueue failed! Key=%s, Room=%s, Err=%v, DropCount=%d, GlobalDrop=%d",
 				c.Key,
@@ -144,8 +148,8 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 		err = pkg.ErrSignalFullMsgDropped
 
 		// 增加丢弃计数
-		dropCount := atomic.AddInt64(&c.dropCount, 1)
-		globalDrop := atomic.AddInt64(&globalSignalDropCount, 1)
+		dropCount := atomic.AddInt64(&c.pushDropCount, 1)
+		globalDrop := atomic.AddInt64(&globalPushDropCount, 1)
 
 		// 记录详细日志（每 100 次丢弃打印一次，避免日志爆炸）
 		if dropCount%100 == 1 {
@@ -184,19 +188,39 @@ func (c *Channel) Ready() *protocol.Proto {
 }
 
 func (c *Channel) Signal() {
-	c.signal <- proto.ProtoReady
+	select {
+	case c.signal <- proto.ProtoReady:
+	default:
+		atomic.AddInt64(&c.signalDropCount, 1)
+		atomic.AddInt64(&globalSignalDropCount, 1)
+	}
 }
 
 func (c *Channel) Close() {
 	c.signal <- proto.ProtoFinish
 }
 
-// GetDropCount 获取当前 Channel 的消息丢弃次数
+// GetDropCount 获取当前 Channel 的业务 push 丢弃次数。
 func (c *Channel) GetDropCount() int64 {
-	return atomic.LoadInt64(&c.dropCount)
+	return atomic.LoadInt64(&c.pushDropCount)
 }
 
-// GetGlobalDropCount 获取全局消息丢弃次数
+// GetSignalDropCount 获取当前 Channel 的 ready signal 丢弃次数。
+func (c *Channel) GetSignalDropCount() int64 {
+	return atomic.LoadInt64(&c.signalDropCount)
+}
+
+// GetGlobalPushDropCount 获取全局业务 push 丢弃次数。
+func GetGlobalPushDropCount() int64 {
+	return atomic.LoadInt64(&globalPushDropCount)
+}
+
+// GetGlobalDropCount 获取全局 ready signal 丢弃次数。
 func GetGlobalDropCount() int64 {
+	return atomic.LoadInt64(&globalSignalDropCount)
+}
+
+// GetGlobalSignalDropCount 获取全局 ready signal 丢弃次数。
+func GetGlobalSignalDropCount() int64 {
 	return atomic.LoadInt64(&globalSignalDropCount)
 }
