@@ -80,3 +80,18 @@ func BenchmarkDelRoomWithOneChannel(b *testing.B) {
 		_ = ch.Ready()
 	}
 }
+
+// BenchmarkDelRoomReuseBucket isolates DelRoom map/lock cost by reusing objects.
+func BenchmarkDelRoomReuseBucket(b *testing.B) {
+	bucket := newTestBucket()
+	room := NewRoom("bench-room-reuse")
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		bucket.cLock.Lock()
+		bucket.rooms[room.ID] = room
+		bucket.cLock.Unlock()
+		bucket.DelRoom(room)
+	}
+}
