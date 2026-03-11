@@ -37,7 +37,7 @@ development_status:
   epic-1-retrospective: optional
 
   epic-2: backlog
-  2-1-unify-shared-writer-path: backlog
+  2-1-unify-shared-writer-path: ready-for-dev
   2-2-validate-three-flush-triggers: backlog
   2-3-broadcast-snapshot-and-unlock-push: backlog
   2-4-queue-full-failure-semantics-and-observability: backlog
