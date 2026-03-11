@@ -39,6 +39,7 @@ development_status:
   epic-2: in-progress
   2-1-unify-shared-writer-path: done
   2-2-validate-three-flush-triggers: done
+  2-2a-steady-state-flush-benchmark: backlog
   2-3-broadcast-snapshot-and-unlock-push: backlog
   2-4-queue-full-failure-semantics-and-observability: backlog
   epic-2-retrospective: optional
