@@ -1,6 +1,6 @@
 # Story 1.4: 并发基线回归包
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,17 +19,17 @@ so that Epic 1 的修复可持续防回归。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 建立并发基线脚本入口（AC: #1, #2）
-  - [ ] Subtask 1.1: 提供 race / bench / pprof 的统一执行入口
-  - [ ] Subtask 1.2: 约定输出目录与产物命名
+- [x] Task 1: 建立并发基线脚本入口（AC: #1, #2）
+  - [x] Subtask 1.1: 提供 race / bench / pprof 的统一执行入口
+  - [x] Subtask 1.2: 约定输出目录与产物命名
 
-- [ ] Task 2: 建立 FR/NFR 对账清单（AC: #2, #3）
-  - [ ] Subtask 2.1: 将 Epic 1 已完成 Story 的验证映射到 FR/NFR
-  - [ ] Subtask 2.2: 记录通过/失败判定标准
+- [x] Task 2: 建立 FR/NFR 对账清单（AC: #2, #3）
+  - [x] Subtask 2.1: 将 Epic 1 已完成 Story 的验证映射到 FR/NFR
+  - [x] Subtask 2.2: 记录通过/失败判定标准
 
-- [ ] Task 3: 执行最小验证（AC: #2）
-  - [ ] Subtask 3.1: 运行 `go test ./connect-node/...`
-  - [ ] Subtask 3.2: 运行 `go test -race ./connect-node/...`
+- [x] Task 3: 执行最小验证（AC: #2）
+  - [x] Subtask 3.1: 运行 `go test ./connect-node/...`
+  - [x] Subtask 3.2: 运行 `go test -race ./connect-node/...`
 
 ## Dev Notes
 
@@ -53,11 +53,22 @@ Amelia-context / create-story
 
 ### Debug Log References
 
-- 待开发阶段填充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.017s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.042s`
+- `run-concurrency-baseline.sh`
+- 结果：
+  - 统一产出 `go-test` / `go-test-race` / `go-bench` / `pprof` 资产到 `validation/story-1-4/`
+  - `BenchmarkDelRoom-16 1355 ns/op 2208 B/op 12 allocs/op`
+  - `BenchmarkCloseConcurrentContention-16 8052 ns/op 1312 B/op 27 allocs/op`
 
 ### Completion Notes List
 
-- 待开发阶段填充
+- 已提供统一回归入口：`run-concurrency-baseline.sh`，覆盖 `go test`、`go test -race`、benchmark 与 CPU/memory/mutex/block `pprof` 采集。
+- 已提供 `fr-nfr-traceability.md`，将 Epic 1 的 Story 1.1 ~ 1.4 验证资产映射到 FR/NFR。
+- 已执行脚本并生成可追溯产物到 `validation/story-1-4/`。
+- 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
 
 ### File List
 
@@ -67,3 +78,4 @@ Amelia-context / create-story
 ## Change Log
 
 - 2026-03-11: 创建 Story 1.4 开发上下文，状态设为 `ready-for-dev`。
+- 2026-03-11: 完成并发基线回归包（脚本入口 + FR/NFR 映射 + 基线产物），状态更新为 `review`。
