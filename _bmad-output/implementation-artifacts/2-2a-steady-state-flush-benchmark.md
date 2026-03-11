@@ -1,6 +1,6 @@
 # Story 2.2a: steady-state flush 长跑基准
 
-Status: review
+Status: done
 
 <!-- Note: This is a backlog story created from Story 2.2 review follow-up. -->
 
@@ -90,3 +90,31 @@ Amelia-context / backlog-story
 - 2026-03-11: 新增 Epic 2 backlog story，补足 steady-state flush 基准缺口。
 - 2026-03-11: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-11: 完成 steady-state flush benchmark、profiling 与可复跑入口，状态更新为 `review`。
+- 2026-03-11: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-11
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- steady-state benchmark 已真正复用已注册 session / shard。`BenchmarkSharedWriterSteadyStateFlushByCount`、`...ByBytes`、`...ByTimeout` 都在基准开始前完成 `newRegisteredFlushShardWithSession(...)`，循环内仅重复 enqueue / timer 驱动 flush，不再每轮重建 shard/session/pool。
+- `count` / `bytes` / `timeout` 三条 steady-state 路径都已覆盖，且触发方式与 Story 2.2 的 correctness baseline 保持一致。
+- CPU / memory / mutex / block `pprof` 结论可信，且已与 Story 2.2 形成清晰区分：
+  - Story 2.2 热点主要是初始化与 pool grow
+  - Story 2.2a 热点已转到 `handleEvent`、`flushState`、`ProtoPackageHandler.Write` 和计时逻辑
+- 未发现新的行为回归。本 Story 只增加 benchmark/validation 代码，没有改变 shared writer 产品语义。
+
+### Residual Risks / Testing Gaps
+
+- `timeout` steady-state benchmark 通过直接回拨 `deadline` 触发 timer 路径，优点是稳定、低噪音；缺点是它刻意回避了真实时钟等待成本。若后续需要评估真实 wall-clock timeout 行为，可再补一个低频长间隔基准作为补充，但这不构成本 Story 的阻塞问题。
