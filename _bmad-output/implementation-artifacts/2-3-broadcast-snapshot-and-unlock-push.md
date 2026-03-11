@@ -1,6 +1,6 @@
 # Story 2.3: 广播快照后解锁推送
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -50,15 +50,21 @@ so that 我可以降低全局锁竞争并提升广播稳定性。
 
 ### Agent Model Used
 
-Amelia-context / create-story
+Amelia-context / dev-story
 
 ### Debug Log References
 
-- 待开发阶段补充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.054s`
 
 ### Completion Notes List
 
 - 2026-03-11: 创建 Story 2.3 开发上下文，状态设为 `ready-for-dev`。
+- 已将 `Bucket.Broadcast` 调整为锁内只做 channel 快照，`NeedPush` / room 过滤 / `Push` 均在锁外执行。
+- 已新增回归测试，验证 push 期间 `bucket.cLock` 已释放，且 room / op 过滤行为不回归。
+- 使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...` 均通过。
 
 ### File List
 
@@ -68,3 +74,4 @@ Amelia-context / create-story
 ## Change Log
 
 - 2026-03-11: 创建 Story 2.3 开发上下文，状态设为 `ready-for-dev`。
+- 2026-03-11: 完成广播快照后解锁推送改造并补充回归测试，状态更新为 `review`。

@@ -40,7 +40,7 @@ development_status:
   2-1-unify-shared-writer-path: done
   2-2-validate-three-flush-triggers: done
   2-2a-steady-state-flush-benchmark: done
-  2-3-broadcast-snapshot-and-unlock-push: ready-for-dev
+  2-3-broadcast-snapshot-and-unlock-push: review
   2-4-queue-full-failure-semantics-and-observability: backlog
   epic-2-retrospective: optional
 
