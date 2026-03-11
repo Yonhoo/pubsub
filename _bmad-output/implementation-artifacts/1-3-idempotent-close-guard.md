@@ -61,9 +61,9 @@ Amelia-context / create-story
 ### Debug Log References
 
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
-- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.014s`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.013s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
-- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.045s`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.059s`
 
 ### Completion Notes List
 
@@ -71,6 +71,7 @@ Amelia-context / create-story
 - `Ready()` 在关闭态下优先返回 `ProtoFinish`，不再受广播消息占用 `signal` 通道影响。
 - 新增 `channel_test.go` 回归测试，覆盖“signal 被占用时 Close 不阻塞”和“并发多次 Close 幂等”场景。
 - 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
+- 已补充高并发关闭测试，覆盖“多 goroutine 并发 Close”“ready/broadcast 与 Close 混合”“关闭后 Signal/重复 Close 不阻塞”场景。
 
 ### File List
 
@@ -81,3 +82,4 @@ Amelia-context / create-story
 
 - 2026-03-10: 创建 Story 1.3 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-10: 完成 `Close()` 幂等与非阻塞保护实现，状态更新为 `review`。
+- 2026-03-10: 补充高并发关闭测试覆盖，Story 状态保持 `review`。
