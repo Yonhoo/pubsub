@@ -163,14 +163,23 @@ func (b *Bucket) Channel(key string) (ch *Channel) {
 	return
 }
 
+func (b *Bucket) broadcastSnapshot() []*Channel {
+	b.cLock.RLock()
+	snapshot := make([]*Channel, 0, len(b.chs))
+	for _, ch := range b.chs {
+		snapshot = append(snapshot, ch)
+	}
+	b.cLock.RUnlock()
+	return snapshot
+}
+
 func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
 	var ch *Channel
 	matchedCount := 0
 	skippedByOp := 0
 	skippedByRoom := 0
 
-	b.cLock.RLock()
-	for _, ch = range b.chs {
+	for _, ch = range b.broadcastSnapshot() {
 		if !ch.NeedPush(op) {
 			skippedByOp++
 			continue
@@ -190,7 +199,6 @@ func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
 		}
 	}
 
-	b.cLock.RUnlock()
 	hotLogf("[Bucket] Broadcast done: matched=%d skip_op=%d skip_room=%d", matchedCount, skippedByOp, skippedByRoom)
 }
 
