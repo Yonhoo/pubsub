@@ -1,6 +1,6 @@
 # Story 1.4: 并发基线回归包
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -79,3 +79,28 @@ Amelia-context / create-story
 
 - 2026-03-11: 创建 Story 1.4 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成并发基线回归包（脚本入口 + FR/NFR 映射 + 基线产物），状态更新为 `review`。
+- 2026-03-11: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-11
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- `run-concurrency-baseline.sh` 已能作为统一复用入口，覆盖 `go test`、`go test -race`、benchmark 与 CPU/memory/mutex/block `pprof` 采集。
+- `fr-nfr-traceability.md` 已将 Epic 1 Story 1.1 ~ 1.4 的验证资产映射到对应 FR/NFR，满足 Story 1.4 的可追溯目标。
+- 已生成完整基线产物，足以支撑 Epic 1 并发正确性回归；后续只需复跑脚本并对比产物即可。
+
+### Residual Risks / Testing Gaps
+
+- 基线脚本默认依赖当前 Go 环境变量，后续若执行环境变更，需要在调用方显式传入 `GO_BIN` 或保持 Go 工具链可用。
