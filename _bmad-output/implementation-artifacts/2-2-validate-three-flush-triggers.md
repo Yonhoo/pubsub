@@ -1,6 +1,6 @@
 # Story 2.2: 批处理三触发条件验证
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -88,3 +88,28 @@ Amelia-context / dev-story
 - 2026-03-11: 创建 Story 2.2 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成三触发路径统计与回归测试，状态更新为 `review`。
 - 2026-03-11: 补充三触发 benchmark 与 `pprof` 验证，Story 状态保持 `review`。
+- 2026-03-11: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-11
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- `count` / `bytes` / `timeout` 三类 flush trigger 的分类语义清晰：入队路径按阈值优先级区分 `count` 与 `bytes`，定时器路径单独记为 `timeout`，不会把不同来源混算到同一类指标中。
+- `unregister` / `stop` drain 记为 `other` 而不计入三触发统计的口径是合理的。它们属于生命周期收尾 flush，不代表负载驱动的批处理触发条件；混入三触发计数会直接污染 FR2 验证。
+- 新增回归测试、benchmark 和 `pprof` 足以支撑通过：正确性测试已经锁住三条触发路径和 drain 隔离，性能验证也没有暴露新的业务锁热点或分类逻辑异常开销。
+
+### Residual Risks / Testing Gaps
+
+- 当前 benchmark 的热点主要由测试基线中的 shard/session/pool 初始化主导，因此它更适合作为“回归哨兵”而不是生产成本精确画像。若后续需要评估 steady-state flush 开销，建议单独补一个复用已注册 session 的长跑基准。
