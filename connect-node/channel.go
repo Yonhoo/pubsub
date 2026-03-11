@@ -50,6 +50,7 @@ type Channel struct {
 	ClientReqQueue RingPWB // 改用 RingPWB 存储 ProtoWithBuffer 指针
 	signal         chan *protocol.Proto
 	ready          chan struct{}
+	done           chan struct{}
 
 	Next *Channel
 	Prev *Channel
@@ -67,6 +68,7 @@ type Channel struct {
 	pushDropCount int64
 	// 统计：本 Channel 的 ready signal 丢弃次数
 	signalDropCount int64
+	closed          uint32
 }
 
 func NewChannel(cli, svr int) *Channel {
@@ -76,6 +78,7 @@ func NewChannel(cli, svr int) *Channel {
 
 	c.signal = make(chan *protocol.Proto, svr)
 	c.ready = make(chan struct{}, 1)
+	c.done = make(chan struct{})
 
 	c.watchOps = make(map[int32]struct{})
 	return c
@@ -187,6 +190,14 @@ func (c *Channel) ClearServerPushWriter() {
 
 func (c *Channel) Ready() *protocol.Proto {
 	select {
+	case <-c.done:
+		return proto.ProtoFinish
+	default:
+	}
+
+	select {
+	case <-c.done:
+		return proto.ProtoFinish
 	case p := <-c.signal:
 		return p
 	case <-c.ready:
@@ -195,6 +206,9 @@ func (c *Channel) Ready() *protocol.Proto {
 }
 
 func (c *Channel) Signal() {
+	if atomic.LoadUint32(&c.closed) != 0 {
+		return
+	}
 	select {
 	case c.ready <- struct{}{}:
 	default:
@@ -204,7 +218,9 @@ func (c *Channel) Signal() {
 }
 
 func (c *Channel) Close() {
-	c.signal <- proto.ProtoFinish
+	if atomic.CompareAndSwapUint32(&c.closed, 0, 1) {
+		close(c.done)
+	}
 }
 
 // GetDropCount 获取当前 Channel 的业务 push 丢弃次数。
