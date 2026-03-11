@@ -674,18 +674,9 @@ func (h *ProtoMessageHandler) OnMessage(session getty.Session, pkg any) {
 	// Buffer 会传递给 dispatchWebsocket 协程，处理完后由它负责释放
 }
 
-func writeResp(session getty.Session, resp *proto.Proto) {
-	if _, _, err := session.WritePkg(resp, 5*time.Second); err != nil {
-		wsLog("send failed: %v", err)
-	}
-}
-
 func (h *ProtoMessageHandler) writeProto(session getty.Session, p *proto.Proto, source string) error {
 	if h.server == nil || h.server.sharedWriter == nil || h.writeSessionID == 0 {
-		h.writeTraceStart(source)
-		defer h.writeTraceEnd()
-		_, _, err := session.WritePkg(p, 0)
-		return err
+		return fmt.Errorf("shared writer unavailable")
 	}
 	atomic.AddUint64(&h.batchEnqueued, 1)
 	return h.server.sharedWriter.Enqueue(h.writeSessionID, p)
