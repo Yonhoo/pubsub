@@ -28,6 +28,15 @@ const (
 	writeEventUnregister
 )
 
+type flushTrigger uint8
+
+const (
+	flushTriggerOther flushTrigger = iota
+	flushTriggerCount
+	flushTriggerBytes
+	flushTriggerTimeout
+)
+
 type writeEvent struct {
 	kind      writeEventKind
 	sessionID uint64
@@ -135,7 +144,7 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 		if !ok {
 			return
 		}
-		s.flushState(st)
+		s.flushState(st, flushTriggerOther)
 		delete(s.sessions, ev.sessionID)
 	case writeEventEnqueue:
 		st, ok := s.sessions[ev.sessionID]
@@ -153,8 +162,11 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 			st.deadline = time.Now().Add(s.flushInterval)
 			s.armTimer(st.deadline)
 		}
-		if len(st.pending) >= s.batchSize || st.pendingBytes >= s.maxBatchBytes {
-			s.flushState(st)
+		switch {
+		case len(st.pending) >= s.batchSize:
+			s.flushState(st, flushTriggerCount)
+		case st.pendingBytes >= s.maxBatchBytes:
+			s.flushState(st, flushTriggerBytes)
 		}
 	}
 }
@@ -167,7 +179,7 @@ func (s *flushShard) handleTimer() {
 			continue
 		}
 		if !st.deadline.After(now) {
-			s.flushState(st)
+			s.flushState(st, flushTriggerTimeout)
 			continue
 		}
 		if next.IsZero() || st.deadline.Before(next) {
@@ -181,11 +193,11 @@ func (s *flushShard) handleTimer() {
 
 func (s *flushShard) flushAll() {
 	for _, st := range s.sessions {
-		s.flushState(st)
+		s.flushState(st, flushTriggerOther)
 	}
 }
 
-func (s *flushShard) flushState(st *sharedSessionState) {
+func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 	if st == nil || len(st.pending) == 0 {
 		return
 	}
@@ -201,6 +213,14 @@ func (s *flushShard) flushState(st *sharedSessionState) {
 	} else if owner != nil {
 		owner.markWriteTime()
 		atomic.AddUint64(&owner.batchFlushes, 1)
+		switch trigger {
+		case flushTriggerCount:
+			atomic.AddUint64(&owner.batchFlushByCount, 1)
+		case flushTriggerBytes:
+			atomic.AddUint64(&owner.batchFlushByBytes, 1)
+		case flushTriggerTimeout:
+			atomic.AddUint64(&owner.batchFlushByTimeout, 1)
+		}
 		atomic.AddUint64(&owner.batchFlushedPkgs, uint64(pkgs))
 		atomic.AddUint64(&owner.batchFlushedBytes, uint64(bytes))
 		for {

@@ -279,6 +279,9 @@ type ProtoMessageHandler struct {
 	// Batch 写入验证统计（用于确认 WriteBytesArray 合并发送是否生效）
 	batchEnqueued         uint64
 	batchFlushes          uint64
+	batchFlushByCount     uint64
+	batchFlushByBytes     uint64
+	batchFlushByTimeout   uint64
 	batchFlushedPkgs      uint64
 	batchFlushedBytes     uint64
 	batchMaxPkgsPerFlush  uint32
