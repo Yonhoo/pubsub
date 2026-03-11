@@ -1,8 +1,10 @@
 package main
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	proto "github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
@@ -131,4 +133,92 @@ func BenchmarkDelRoomContention(b *testing.B) {
 			_ = bucket.RoomsCount()
 		}
 	})
+}
+
+func TestBroadcastReleasesBucketLockBeforePush(t *testing.T) {
+	bucket := newTestBucket()
+	ch := NewChannel(1, 1)
+	ch.Key = "broadcast-lock"
+	ch.Watch(1)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	ch.SetServerPushWriter(func(*proto.Proto) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	})
+
+	if err := bucket.Put("", ch); err != nil {
+		t.Fatalf("put channel failed: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		bucket.Broadcast(&proto.Proto{Op: 1}, 1)
+		close(done)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("broadcast never reached push path")
+	}
+
+	locked := make(chan struct{})
+	go func() {
+		bucket.cLock.Lock()
+		close(locked)
+		bucket.cLock.Unlock()
+	}()
+
+	select {
+	case <-locked:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("bucket.cLock remained held during push")
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("broadcast did not finish after releasing push")
+	}
+}
+
+func TestBroadcastSnapshotPreservesRoomAndOpFiltering(t *testing.T) {
+	bucket := newTestBucket()
+
+	newPushChannel := func(key, roomID string, watchOp int32, counter *int32) *Channel {
+		ch := NewChannel(1, 1)
+		ch.Key = key
+		ch.Watch(watchOp)
+		ch.SetServerPushWriter(func(*proto.Proto) error {
+			atomic.AddInt32(counter, 1)
+			return nil
+		})
+		if err := bucket.Put(roomID, ch); err != nil {
+			t.Fatalf("put channel %s failed: %v", key, err)
+		}
+		return ch
+	}
+
+	var matched, wrongOp, wrongRoom int32
+	_ = newPushChannel("match", "room-a", 1, &matched)
+	_ = newPushChannel("wrong-op", "room-a", 2, &wrongOp)
+	_ = newPushChannel("wrong-room", "room-b", 1, &wrongRoom)
+
+	bucket.Broadcast(&proto.Proto{Roomid: "room-a", Op: 1}, 1)
+
+	if got := atomic.LoadInt32(&matched); got != 1 {
+		t.Fatalf("expected matched channel to receive 1 push, got %d", got)
+	}
+	if got := atomic.LoadInt32(&wrongOp); got != 0 {
+		t.Fatalf("expected wrong-op channel to receive 0 pushes, got %d", got)
+	}
+	if got := atomic.LoadInt32(&wrongRoom); got != 0 {
+		t.Fatalf("expected wrong-room channel to receive 0 pushes, got %d", got)
+	}
 }
