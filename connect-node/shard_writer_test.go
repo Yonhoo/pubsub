@@ -16,6 +16,7 @@ import (
 type mockGettySession struct {
 	mu         sync.Mutex
 	writes     [][][]byte
+	record     bool
 	closed     atomic.Bool
 	readTO     time.Duration
 	writeTO    time.Duration
@@ -66,13 +67,19 @@ func (m *mockGettySession) WriteBytesArray(pkgs ...[]byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	total := 0
-	batch := make([][]byte, len(pkgs))
-	for i, pkg := range pkgs {
-		cp := append([]byte(nil), pkg...)
-		batch[i] = cp
-		total += len(cp)
+	if m.record {
+		batch := make([][]byte, len(pkgs))
+		for i, pkg := range pkgs {
+			cp := append([]byte(nil), pkg...)
+			batch[i] = cp
+			total += len(cp)
+		}
+		m.writes = append(m.writes, batch)
+		return total, nil
 	}
-	m.writes = append(m.writes, batch)
+	for _, pkg := range pkgs {
+		total += len(pkg)
+	}
 	return total, nil
 }
 func (m *mockGettySession) Close() { m.closed.Store(true) }
@@ -102,11 +109,13 @@ func (m *mockGettySession) writeBatches() [][][]byte {
 	return out
 }
 
-func newRegisteredFlushShard(batchSize, maxBatchBytes int, flushInterval time.Duration) (*flushShard, uint64, *ProtoMessageHandler, *mockGettySession) {
+func newRegisteredFlushShardWithSession(batchSize, maxBatchBytes int, flushInterval time.Duration, session *mockGettySession) (*flushShard, uint64, *ProtoMessageHandler, *mockGettySession) {
 	shard := newFlushShard(0, batchSize, maxBatchBytes, flushInterval, 16)
 	sessionID := uint64(1)
 	owner := &ProtoMessageHandler{}
-	session := &mockGettySession{}
+	if session == nil {
+		session = &mockGettySession{record: true}
+	}
 	shard.handleEvent(writeEvent{
 		kind:      writeEventRegister,
 		sessionID: sessionID,
@@ -115,6 +124,10 @@ func newRegisteredFlushShard(batchSize, maxBatchBytes int, flushInterval time.Du
 		owner:     owner,
 	})
 	return shard, sessionID, owner, session
+}
+
+func newRegisteredFlushShard(batchSize, maxBatchBytes int, flushInterval time.Duration) (*flushShard, uint64, *ProtoMessageHandler, *mockGettySession) {
+	return newRegisteredFlushShardWithSession(batchSize, maxBatchBytes, flushInterval, nil)
 }
 
 func testProto(seq int32, bodySize int) *proto.Proto {
@@ -306,4 +319,47 @@ func BenchmarkSharedWriterFlushByTimeoutParallel(b *testing.B) {
 			shard.handleTimer()
 		}
 	})
+}
+
+func BenchmarkSharedWriterSteadyStateFlushByCount(b *testing.B) {
+	shard, sessionID, _, _ := newRegisteredFlushShardWithSession(4, writeBatchMaxBytes, time.Hour, &mockGettySession{})
+	msgs := []*proto.Proto{
+		testProto(1, 16),
+		testProto(2, 16),
+		testProto(3, 16),
+		testProto(4, 16),
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, msg := range msgs {
+			shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: msg})
+		}
+	}
+}
+
+func BenchmarkSharedWriterSteadyStateFlushByBytes(b *testing.B) {
+	shard, sessionID, _, _ := newRegisteredFlushShardWithSession(8, 128, time.Hour, &mockGettySession{})
+	msg := testProto(1, 256)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: msg})
+	}
+}
+
+func BenchmarkSharedWriterSteadyStateFlushByTimeout(b *testing.B) {
+	shard, sessionID, _, _ := newRegisteredFlushShardWithSession(8, writeBatchMaxBytes, time.Hour, &mockGettySession{})
+	msg := testProto(1, 16)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: msg})
+		st := shard.sessions[sessionID]
+		st.deadline = time.Now().Add(-time.Millisecond)
+		shard.handleTimer()
+	}
 }
