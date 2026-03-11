@@ -55,6 +55,10 @@ Amelia-context / create-story
 - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.030s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
 - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.052s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -run=^$ -bench WriteProtoSharedWriter -benchmem ./connect-node/...`
+- 结果：
+  - `BenchmarkWriteProtoSharedWriterParallel-16 5227021 251.2 ns/op 112 B/op 1 allocs/op`
+  - `BenchmarkWriteProtoSharedWriterManySessions-16 13658607 434.1 ns/op 112 B/op 1 allocs/op`
 
 ### Completion Notes List
 
@@ -63,6 +67,7 @@ Amelia-context / create-story
 - 已新增 `server_websocket_test.go`，锁住“无 shared writer 时返回错误而非回退直写”的行为。
 - 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
 - 已补充高并发测试，覆盖多 goroutine 并发走 `writeProto/shared writer` 路径，以及 shared writer 缺失时错误语义稳定不回退直写。
+- 已补充超高并发 benchmark 与 `pprof` 产物，用于观察 shared writer 路径在高压下的 CPU/内存/锁热点。
 
 ### File List
 
@@ -74,3 +79,4 @@ Amelia-context / create-story
 - 2026-03-11: 创建 Story 2.1 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成共享写路径唯一化改造并补充回归测试，状态更新为 `review`。
 - 2026-03-11: 补充高并发 shared writer 路径测试，Story 状态保持 `review`。
+- 2026-03-11: 补充 shared writer 超高并发 benchmark 与 `pprof` 验证，Story 状态保持 `review`。
