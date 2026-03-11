@@ -52,9 +52,9 @@ Amelia-context / create-story
 ### Debug Log References
 
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
-- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.029s`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.030s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
-- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.046s`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.052s`
 
 ### Completion Notes List
 
@@ -62,6 +62,7 @@ Amelia-context / create-story
 - 已删除不再使用的旧写入辅助函数，减少分叉路径残留。
 - 已新增 `server_websocket_test.go`，锁住“无 shared writer 时返回错误而非回退直写”的行为。
 - 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
+- 已补充高并发测试，覆盖多 goroutine 并发走 `writeProto/shared writer` 路径，以及 shared writer 缺失时错误语义稳定不回退直写。
 
 ### File List
 
@@ -72,3 +73,4 @@ Amelia-context / create-story
 
 - 2026-03-11: 创建 Story 2.1 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成共享写路径唯一化改造并补充回归测试，状态更新为 `review`。
+- 2026-03-11: 补充高并发 shared writer 路径测试，Story 状态保持 `review`。
