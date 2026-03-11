@@ -59,6 +59,14 @@ Amelia-context / dev-story
 - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
 - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.060s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -run=^$ -bench "SharedWriterFlushBy(Count|Bytes|Timeout)" -benchmem -cpuprofile ... -memprofile ... -mutexprofile ... -blockprofile ... ./connect-node/...`
+- 结果：
+  - `BenchmarkSharedWriterFlushByCount-16 154216 8099 ns/op 36384 B/op 35 allocs/op`
+  - `BenchmarkSharedWriterFlushByCountParallel-16 271435 4311 ns/op 36384 B/op 35 allocs/op`
+  - `BenchmarkSharedWriterFlushByBytes-16 149395 8162 ns/op 36456 B/op 23 allocs/op`
+  - `BenchmarkSharedWriterFlushByBytesParallel-16 341256 3752 ns/op 36456 B/op 23 allocs/op`
+  - `BenchmarkSharedWriterFlushByTimeout-16 195829 7095 ns/op 35736 B/op 23 allocs/op`
+  - `BenchmarkSharedWriterFlushByTimeoutParallel-16 300385 3705 ns/op 35736 B/op 23 allocs/op`
 
 ### Completion Notes List
 
@@ -67,6 +75,7 @@ Amelia-context / dev-story
 - 已将 `unregister` / `stop` 触发的 drain flush 从三触发统计中隔离，避免污染验证口径。
 - 已新增 `shard_writer_test.go`，覆盖按条数、按字节、按超时，以及 unregister drain 不污染三触发计数。
 - 使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...` 均通过。
+- 已补充三触发 benchmark 与 `pprof` 产物，CPU/内存热点主要集中在基准自身的 shard/session/pool 初始化分配，而非 flush reason 计数分支。
 
 ### File List
 
@@ -78,3 +87,4 @@ Amelia-context / dev-story
 
 - 2026-03-11: 创建 Story 2.2 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成三触发路径统计与回归测试，状态更新为 `review`。
+- 2026-03-11: 补充三触发 benchmark 与 `pprof` 验证，Story 状态保持 `review`。
