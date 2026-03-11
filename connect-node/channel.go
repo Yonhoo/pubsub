@@ -49,6 +49,7 @@ type Channel struct {
 	Room           *Room
 	ClientReqQueue RingPWB // 改用 RingPWB 存储 ProtoWithBuffer 指针
 	signal         chan *protocol.Proto
+	ready          chan struct{}
 
 	Next *Channel
 	Prev *Channel
@@ -74,6 +75,7 @@ func NewChannel(cli, svr int) *Channel {
 	c.ClientReqQueue.Init(cli)
 
 	c.signal = make(chan *protocol.Proto, svr)
+	c.ready = make(chan struct{}, 1)
 
 	c.watchOps = make(map[int32]struct{})
 	return c
@@ -184,12 +186,17 @@ func (c *Channel) ClearServerPushWriter() {
 }
 
 func (c *Channel) Ready() *protocol.Proto {
-	return <-c.signal
+	select {
+	case p := <-c.signal:
+		return p
+	case <-c.ready:
+		return proto.ProtoReady
+	}
 }
 
 func (c *Channel) Signal() {
 	select {
-	case c.signal <- proto.ProtoReady:
+	case c.ready <- struct{}{}:
 	default:
 		atomic.AddInt64(&c.signalDropCount, 1)
 		atomic.AddInt64(&globalSignalDropCount, 1)
