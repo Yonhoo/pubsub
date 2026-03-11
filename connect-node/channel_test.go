@@ -15,12 +15,12 @@ func resetChannelDropCounters() {
 	atomic.StoreInt64(&globalSignalDropCount, 0)
 }
 
-func mustEnqueueClientRequest(t *testing.T, ch *Channel, p *proto.Proto) {
-	t.Helper()
+func mustEnqueueClientRequest(tb testing.TB, ch *Channel, p *proto.Proto) {
+	tb.Helper()
 
 	slot, err := ch.ClientReqQueue.Set()
 	if err != nil {
-		t.Fatalf("enqueue request failed: %v", err)
+		tb.Fatalf("enqueue request failed: %v", err)
 	}
 	*slot = &gettypkg.ProtoWithBuffer{Proto: p}
 	ch.ClientReqQueue.SetAdv()
@@ -245,4 +245,41 @@ func TestSignalAndCloseDoNotBlockAfterChannelClosed(t *testing.T) {
 	if got := ch.Ready(); got != proto.ProtoFinish {
 		t.Fatalf("expected ProtoFinish after closed signal/close activity, got %#v", got)
 	}
+}
+
+func BenchmarkCloseConcurrentContention(b *testing.B) {
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		ch := NewChannel(8, 1)
+		ch.signal <- &proto.Proto{Op: 501, Seq: 40}
+		mustEnqueueClientRequest(b, ch, &proto.Proto{Op: 502, Seq: 41})
+		ch.Signal()
+
+		var wg sync.WaitGroup
+		for j := 0; j < 16; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ch.Close()
+			}()
+		}
+		wg.Wait()
+
+		_ = ch.Ready()
+	}
+}
+
+func BenchmarkCloseAlreadyClosed(b *testing.B) {
+	ch := NewChannel(8, 1)
+	ch.Close()
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			ch.Close()
+			ch.Signal()
+		}
+	})
 }
