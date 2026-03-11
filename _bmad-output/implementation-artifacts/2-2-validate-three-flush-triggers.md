@@ -1,6 +1,6 @@
 # Story 2.2: 批处理三触发条件验证
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,18 +19,18 @@ so that 吞吐与尾延迟可在不同流量形态下稳定。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 为 flush 路径增加可区分触发原因统计（AC: #1, #2）
-  - [ ] Subtask 1.1: 在 shared writer 中区分 count / bytes / timeout 三类 flush 原因
-  - [ ] Subtask 1.2: 将非目标路径（如 unregister / stop）从三触发统计中隔离
+- [x] Task 1: 为 flush 路径增加可区分触发原因统计（AC: #1, #2）
+  - [x] Subtask 1.1: 在 shared writer 中区分 count / bytes / timeout 三类 flush 原因
+  - [x] Subtask 1.2: 将非目标路径（如 unregister / stop）从三触发统计中隔离
 
-- [ ] Task 2: 补充三触发验证测试（AC: #1, #2, #3)
-  - [ ] Subtask 2.1: 增加按条数触发 flush 的回归测试
-  - [ ] Subtask 2.2: 增加按字节触发 flush 的回归测试
-  - [ ] Subtask 2.3: 增加按超时触发 flush 的回归测试
+- [x] Task 2: 补充三触发验证测试（AC: #1, #2, #3)
+  - [x] Subtask 2.1: 增加按条数触发 flush 的回归测试
+  - [x] Subtask 2.2: 增加按字节触发 flush 的回归测试
+  - [x] Subtask 2.3: 增加按超时触发 flush 的回归测试
 
-- [ ] Task 3: 执行验证（AC: #4）
-  - [ ] Subtask 3.1: 运行 `go test ./connect-node/...`
-  - [ ] Subtask 3.2: 运行 `go test -race ./connect-node/...`
+- [x] Task 3: 执行验证（AC: #4）
+  - [x] Subtask 3.1: 运行 `go test ./connect-node/...`
+  - [x] Subtask 3.2: 运行 `go test -race ./connect-node/...`
 
 ## Dev Notes
 
@@ -51,21 +51,30 @@ so that 吞吐与尾延迟可在不同流量形态下稳定。
 
 ### Agent Model Used
 
-Amelia-context / create-story
+Amelia-context / dev-story
 
 ### Debug Log References
 
-- 待开发阶段补充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.060s`
 
 ### Completion Notes List
 
 - 2026-03-11: 创建 Story 2.2 开发上下文，状态设为 `ready-for-dev`。
+- 已为 shared writer 的 flush 统计增加 `count` / `bytes` / `timeout` 三类原因计数。
+- 已将 `unregister` / `stop` 触发的 drain flush 从三触发统计中隔离，避免污染验证口径。
+- 已新增 `shard_writer_test.go`，覆盖按条数、按字节、按超时，以及 unregister drain 不污染三触发计数。
+- 使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...` 均通过。
 
 ### File List
 
 - /mnt/pubsub/connect-node/shard_writer.go
+- /mnt/pubsub/connect-node/server_websocket.go
 - /mnt/pubsub/connect-node/shard_writer_test.go
 
 ## Change Log
 
 - 2026-03-11: 创建 Story 2.2 开发上下文，状态设为 `ready-for-dev`。
+- 2026-03-11: 完成三触发路径统计与回归测试，状态更新为 `review`。
