@@ -32,7 +32,7 @@ development_status:
   epic-1: in-progress
   1-1-fix-delroom-lock-semantics: done
   1-2-non-blocking-signal-and-drop-counter: done
-  1-3-idempotent-close-guard: ready-for-dev
+  1-3-idempotent-close-guard: review
   1-4-concurrency-baseline-regression-pack: backlog
   epic-1-retrospective: optional
 

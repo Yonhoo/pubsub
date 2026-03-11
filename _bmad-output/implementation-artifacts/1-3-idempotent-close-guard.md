@@ -1,6 +1,6 @@
 # Story 1.3: Close 幂等与关闭保护
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,21 +19,21 @@ so that 重复关闭不会导致阻塞或 panic。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 为 `Close()` 增加幂等关闭保护（AC: #1, #4）
-  - [ ] Subtask 1.1: 引入关闭态标记，避免重复关闭
-  - [ ] Subtask 1.2: 保持现有调用方无需改签名
+- [x] Task 1: 为 `Close()` 增加幂等关闭保护（AC: #1, #4）
+  - [x] Subtask 1.1: 引入关闭态标记，避免重复关闭
+  - [x] Subtask 1.2: 保持现有调用方无需改签名
 
-- [ ] Task 2: 消除关闭路径阻塞（AC: #2, #3）
-  - [ ] Subtask 2.1: 将关闭通知与广播/ready 解耦
-  - [ ] Subtask 2.2: 确保 `Ready()` 在关闭态下优先返回 finish
+- [x] Task 2: 消除关闭路径阻塞（AC: #2, #3）
+  - [x] Subtask 2.1: 将关闭通知与广播/ready 解耦
+  - [x] Subtask 2.2: 确保 `Ready()` 在关闭态下优先返回 finish
 
-- [ ] Task 3: 补充回归测试（AC: #1, #2, #3）
-  - [ ] Subtask 3.1: 验证 signal 满时 `Close()` 不阻塞
-  - [ ] Subtask 3.2: 验证并发多次 `Close()` 不 panic 且只产生一次有效 finish
+- [x] Task 3: 补充回归测试（AC: #1, #2, #3）
+  - [x] Subtask 3.1: 验证 signal 满时 `Close()` 不阻塞
+  - [x] Subtask 3.2: 验证并发多次 `Close()` 不 panic 且只产生一次有效 finish
 
-- [ ] Task 4: 执行验证并更新状态
-  - [ ] Subtask 4.1: 运行 `go test ./connect-node/...`
-  - [ ] Subtask 4.2: 运行 `go test -race ./connect-node/...`
+- [x] Task 4: 执行验证并更新状态
+  - [x] Subtask 4.1: 运行 `go test ./connect-node/...`
+  - [x] Subtask 4.2: 运行 `go test -race ./connect-node/...`
 
 ## Dev Notes
 
@@ -60,11 +60,17 @@ Amelia-context / create-story
 
 ### Debug Log References
 
-- 待开发阶段填充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.014s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.045s`
 
 ### Completion Notes List
 
-- 待开发阶段填充
+- `Close()` 已改为基于 `done` 通道的一次性关闭信号；重复 `Close()` 调用不再阻塞或重复执行关闭动作。
+- `Ready()` 在关闭态下优先返回 `ProtoFinish`，不再受广播消息占用 `signal` 通道影响。
+- 新增 `channel_test.go` 回归测试，覆盖“signal 被占用时 Close 不阻塞”和“并发多次 Close 幂等”场景。
+- 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
 
 ### File List
 
@@ -74,3 +80,4 @@ Amelia-context / create-story
 ## Change Log
 
 - 2026-03-10: 创建 Story 1.3 开发上下文，状态设为 `ready-for-dev`。
+- 2026-03-10: 完成 `Close()` 幂等与非阻塞保护实现，状态更新为 `review`。
