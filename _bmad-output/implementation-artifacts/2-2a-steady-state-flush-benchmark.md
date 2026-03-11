@@ -1,6 +1,6 @@
 # Story 2.2a: steady-state flush 长跑基准
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: This is a backlog story created from Story 2.2 review follow-up. -->
 
@@ -60,19 +60,33 @@ Amelia-context / backlog-story
 
 ### Debug Log References
 
-- 待后续开发阶段补充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.055s`
+- `GO_BIN=/home/node/.local/go/bin/go /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-2a/run-steady-state-benchmark.sh`
+- 结果：
+  - `BenchmarkSharedWriterSteadyStateFlushByCount-16 4129719 287.1 ns/op 192 B/op 4 allocs/op`
+  - `BenchmarkSharedWriterSteadyStateFlushByBytes-16 5673594 209.6 ns/op 288 B/op 1 allocs/op`
+  - `BenchmarkSharedWriterSteadyStateFlushByTimeout-16 4865248 247.7 ns/op 48 B/op 1 allocs/op`
 
 ### Completion Notes List
 
 - 2026-03-11: 基于 Story 2.2 review 保留项新增 backlog story，尚未进入实现阶段。
 - 2026-03-11: Story 2.2a 正式进入开发准备，状态更新为 `ready-for-dev`。
+- 已为 shared writer 增加 steady-state 长跑 benchmark，复用已注册 session 与 flush shard，不在每次迭代中重复创建基础对象。
+- 已覆盖 `count` / `bytes` / `timeout` 三条 steady-state flush 路径。
+- 已产出 CPU / memory / mutex / block profile 和可复跑脚本。
+- 已使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...`，结果通过。
 
 ### File List
 
 - /mnt/pubsub/connect-node/shard_writer_test.go
 - /mnt/pubsub/connect-node/shard_writer.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-2a/run-steady-state-benchmark.sh
 
 ## Change Log
 
 - 2026-03-11: 新增 Epic 2 backlog story，补足 steady-state flush 基准缺口。
 - 2026-03-11: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-11: 完成 steady-state flush benchmark、profiling 与可复跑入口，状态更新为 `review`。
