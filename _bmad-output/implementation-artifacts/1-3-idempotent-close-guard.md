@@ -1,6 +1,6 @@
 # Story 1.3: Close 幂等与关闭保护
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -89,3 +89,28 @@ Amelia-context / create-story
 - 2026-03-10: 完成 `Close()` 幂等与非阻塞保护实现，状态更新为 `review`。
 - 2026-03-10: 补充高并发关闭测试覆盖，Story 状态保持 `review`。
 - 2026-03-11: 补充 Close benchmark 与 `pprof` 验证，Story 状态保持 `review`。
+- 2026-03-11: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-11
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- `done` 关闭信号方案已满足 Story 1.3 的目标：`Close()` 幂等、不可阻塞，且在广播/ready 混合存在时 `Ready()` 能稳定观察到关闭事件。
+- 新增高并发测试已覆盖多 goroutine 并发 `Close()`、ready/broadcast 混合、关闭后重复 `Signal()`/`Close()` 不阻塞的 reviewer 关注场景。
+- `pprof` 显示 CPU 热点集中在 `Channel.Close` 自身，mutex/block 结果以 benchmark 运行时同步成本为主，未见额外业务锁热点或异常阻塞画像。
+
+### Residual Risks / Testing Gaps
+
+- 关闭后的广播丢弃/清理一致性属于更上层会话关闭路径语义，不是本 Story 的新增问题。
