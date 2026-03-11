@@ -231,3 +231,79 @@ func TestUnregisterFlushDoesNotPolluteTriggerCounters(t *testing.T) {
 		t.Fatalf("expected unregister to flush one pending pkg, got %#v", writes)
 	}
 }
+
+func benchmarkFlushByCount(b *testing.B, bodySize int) {
+	for i := 0; i < b.N; i++ {
+		shard, sessionID, _, _ := newRegisteredFlushShard(4, writeBatchMaxBytes, time.Hour)
+		for seq := int32(0); seq < 4; seq++ {
+			shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: testProto(seq+1, bodySize)})
+		}
+	}
+}
+
+func benchmarkFlushByBytes(b *testing.B, bodySize int) {
+	for i := 0; i < b.N; i++ {
+		shard, sessionID, _, _ := newRegisteredFlushShard(8, 128, time.Hour)
+		shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: testProto(1, bodySize)})
+	}
+}
+
+func benchmarkFlushByTimeout(b *testing.B, bodySize int) {
+	for i := 0; i < b.N; i++ {
+		shard, sessionID, _, _ := newRegisteredFlushShard(8, writeBatchMaxBytes, time.Hour)
+		shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: testProto(1, bodySize)})
+		st := shard.sessions[sessionID]
+		st.deadline = time.Now().Add(-time.Millisecond)
+		shard.handleTimer()
+	}
+}
+
+func BenchmarkSharedWriterFlushByCount(b *testing.B) {
+	b.ReportAllocs()
+	benchmarkFlushByCount(b, 16)
+}
+
+func BenchmarkSharedWriterFlushByCountParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			shard, sessionID, _, _ := newRegisteredFlushShard(4, writeBatchMaxBytes, time.Hour)
+			for seq := int32(0); seq < 4; seq++ {
+				shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: testProto(seq+1, 16)})
+			}
+		}
+	})
+}
+
+func BenchmarkSharedWriterFlushByBytes(b *testing.B) {
+	b.ReportAllocs()
+	benchmarkFlushByBytes(b, 256)
+}
+
+func BenchmarkSharedWriterFlushByBytesParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			shard, sessionID, _, _ := newRegisteredFlushShard(8, 128, time.Hour)
+			shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: testProto(1, 256)})
+		}
+	})
+}
+
+func BenchmarkSharedWriterFlushByTimeout(b *testing.B) {
+	b.ReportAllocs()
+	benchmarkFlushByTimeout(b, 16)
+}
+
+func BenchmarkSharedWriterFlushByTimeoutParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			shard, sessionID, _, _ := newRegisteredFlushShard(8, writeBatchMaxBytes, time.Hour)
+			shard.handleEvent(writeEvent{kind: writeEventEnqueue, sessionID: sessionID, msg: testProto(1, 16)})
+			st := shard.sessions[sessionID]
+			st.deadline = time.Now().Add(-time.Millisecond)
+			shard.handleTimer()
+		}
+	})
+}
