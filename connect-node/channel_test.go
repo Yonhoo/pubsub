@@ -135,3 +135,51 @@ func TestSignalRemainsDeliverableWhenBroadcastOccupiesSignalChannel(t *testing.T
 		t.Fatalf("expected queued request %#v, got %#v", request, pwb.Proto)
 	}
 }
+
+func TestCloseIsNonBlockingWhenSignalChannelIsOccupied(t *testing.T) {
+	ch := NewChannel(4, 1)
+	ch.signal <- &proto.Proto{Op: 301, Seq: 20}
+
+	done := make(chan struct{})
+	go func() {
+		ch.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Close blocked while signal channel was occupied")
+	}
+
+	if got := ch.Ready(); got != proto.ProtoFinish {
+		t.Fatalf("expected ProtoFinish after close, got %#v", got)
+	}
+}
+
+func TestCloseIsIdempotentUnderConcurrency(t *testing.T) {
+	ch := NewChannel(4, 1)
+	done := make(chan struct{})
+
+	for i := 0; i < 8; i++ {
+		go func() {
+			ch.Close()
+			done <- struct{}{}
+		}()
+	}
+
+	for i := 0; i < 8; i++ {
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("concurrent Close call blocked")
+		}
+	}
+
+	if got := atomic.LoadUint32(&ch.closed); got != 1 {
+		t.Fatalf("expected closed flag to be set once, got %d", got)
+	}
+	if got := ch.Ready(); got != proto.ProtoFinish {
+		t.Fatalf("expected ProtoFinish after concurrent close, got %#v", got)
+	}
+}
