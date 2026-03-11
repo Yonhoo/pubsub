@@ -1,6 +1,6 @@
 # Story 2.2a: steady-state flush 长跑基准
 
-Status: backlog
+Status: ready-for-dev
 
 <!-- Note: This is a backlog story created from Story 2.2 review follow-up. -->
 
@@ -65,6 +65,7 @@ Amelia-context / backlog-story
 ### Completion Notes List
 
 - 2026-03-11: 基于 Story 2.2 review 保留项新增 backlog story，尚未进入实现阶段。
+- 2026-03-11: Story 2.2a 正式进入开发准备，状态更新为 `ready-for-dev`。
 
 ### File List
 
@@ -74,3 +75,4 @@ Amelia-context / backlog-story
 ## Change Log
 
 - 2026-03-11: 新增 Epic 2 backlog story，补足 steady-state flush 基准缺口。
+- 2026-03-11: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
