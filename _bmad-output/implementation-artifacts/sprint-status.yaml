@@ -36,8 +36,8 @@ development_status:
   1-4-concurrency-baseline-regression-pack: done
   epic-1-retrospective: optional
 
-  epic-2: backlog
-  2-1-unify-shared-writer-path: review
+  epic-2: in-progress
+  2-1-unify-shared-writer-path: done
   2-2-validate-three-flush-triggers: backlog
   2-3-broadcast-snapshot-and-unlock-push: backlog
   2-4-queue-full-failure-semantics-and-observability: backlog

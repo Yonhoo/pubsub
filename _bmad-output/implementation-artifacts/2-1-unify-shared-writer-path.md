@@ -1,6 +1,6 @@
 # Story 2.1: 共享写路径唯一化
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -80,3 +80,28 @@ Amelia-context / create-story
 - 2026-03-11: 完成共享写路径唯一化改造并补充回归测试，状态更新为 `review`。
 - 2026-03-11: 补充高并发 shared writer 路径测试，Story 状态保持 `review`。
 - 2026-03-11: 补充 shared writer 超高并发 benchmark 与 `pprof` 验证，Story 状态保持 `review`。
+- 2026-03-11: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-11
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- `writeProto()` 已不再保留 `session.WritePkg` 直写回退，响应与广播写入统一要求进入 shared writer manager。
+- 高并发测试已覆盖多 goroutine 并发入队与 shared writer 缺失时的稳定错误语义，足以支撑“路径唯一化已完成”的结论。
+- `pprof` 热点集中在 `writeProto -> sharedWriteManager.Enqueue` 及运行时同步成本，结论与本 Story 的目标边界一致。
+
+### Residual Risks / Testing Gaps
+
+- 当前新增 benchmark 主要测量 shared writer 的 enqueue 路径，不等同于 flush 触发/批处理行为验证；该部分属于 Story 2.2 的后续范围。
