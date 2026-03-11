@@ -93,3 +93,45 @@ func TestSignalDropDoesNotLoseQueuedRequests(t *testing.T) {
 		t.Fatal("expected queue to be empty after draining requests")
 	}
 }
+
+func TestSignalRemainsDeliverableWhenBroadcastOccupiesSignalChannel(t *testing.T) {
+	resetChannelDropCounters()
+
+	ch := NewChannel(4, 1)
+	broadcast := &proto.Proto{Op: 201, Seq: 10}
+	request := &proto.Proto{Op: 202, Seq: 11}
+
+	ch.signal <- broadcast
+	mustEnqueueClientRequest(t, ch, request)
+	ch.Signal()
+
+	if got := ch.GetSignalDropCount(); got != 0 {
+		t.Fatalf("expected no signal drop while ready is tracked independently, got %d", got)
+	}
+
+	first := ch.Ready()
+	second := ch.Ready()
+	if first == second {
+		t.Fatalf("expected broadcast and ready to both be delivered, got duplicate %#v", first)
+	}
+	if first != broadcast && first != proto.ProtoReady {
+		t.Fatalf("unexpected first delivery %#v", first)
+	}
+	if second != broadcast && second != proto.ProtoReady {
+		t.Fatalf("unexpected second delivery %#v", second)
+	}
+	if first != broadcast && second != broadcast {
+		t.Fatalf("expected broadcast delivery, got %#v and %#v", first, second)
+	}
+	if first != proto.ProtoReady && second != proto.ProtoReady {
+		t.Fatalf("expected ProtoReady delivery, got %#v and %#v", first, second)
+	}
+
+	pwb, err := ch.ClientReqQueue.Get()
+	if err != nil {
+		t.Fatalf("expected queued request after ready notification: %v", err)
+	}
+	if pwb.Proto != request {
+		t.Fatalf("expected queued request %#v, got %#v", request, pwb.Proto)
+	}
+}
