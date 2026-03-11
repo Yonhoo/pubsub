@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -181,5 +182,67 @@ func TestCloseIsIdempotentUnderConcurrency(t *testing.T) {
 	}
 	if got := ch.Ready(); got != proto.ProtoFinish {
 		t.Fatalf("expected ProtoFinish after concurrent close, got %#v", got)
+	}
+}
+
+func TestCloseWithConcurrentReadyAndBroadcastSignals(t *testing.T) {
+	resetChannelDropCounters()
+
+	ch := NewChannel(8, 2)
+	ch.signal <- &proto.Proto{Op: 401, Seq: 30}
+	mustEnqueueClientRequest(t, ch, &proto.Proto{Op: 402, Seq: 31})
+	ch.Signal()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch.Close()
+		}()
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("concurrent close with pending ready/broadcast blocked")
+	}
+
+	if got := atomic.LoadUint32(&ch.closed); got != 1 {
+		t.Fatalf("expected closed flag to stay at 1, got %d", got)
+	}
+
+	for i := 0; i < 3; i++ {
+		if got := ch.Ready(); got != proto.ProtoFinish {
+			t.Fatalf("expected ProtoFinish after close priority, got %#v", got)
+		}
+	}
+}
+
+func TestSignalAndCloseDoNotBlockAfterChannelClosed(t *testing.T) {
+	ch := NewChannel(8, 1)
+	ch.Close()
+
+	done := make(chan struct{})
+	go func() {
+		ch.Signal()
+		ch.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Signal or repeated Close blocked after channel closed")
+	}
+
+	if got := ch.Ready(); got != proto.ProtoFinish {
+		t.Fatalf("expected ProtoFinish after closed signal/close activity, got %#v", got)
 	}
 }
