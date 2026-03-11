@@ -88,3 +88,50 @@ func TestWriteProtoConcurrentWithoutSharedWriterStaysOnErrorPath(t *testing.T) {
 		t.Fatalf("expected batchEnqueued to remain 0, got %d", got)
 	}
 }
+
+func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {
+	manager := newSharedWriteManager(1, 64, writeBatchMaxBytes, 50*time.Millisecond, b.N+1024)
+	h := &ProtoMessageHandler{
+		server:         &ConnectNodeServer{sharedWriter: manager},
+		writeSessionID: 11,
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		var seq int32
+		for pb.Next() {
+			seq++
+			if err := h.writeProto(nil, &proto.Proto{Op: 1, Seq: seq}, "response"); err != nil {
+				b.Fatalf("writeProto failed: %v", err)
+			}
+		}
+	})
+}
+
+func BenchmarkWriteProtoSharedWriterManySessions(b *testing.B) {
+	manager := newSharedWriteManager(4, 64, writeBatchMaxBytes, 50*time.Millisecond, b.N+1024)
+	const sessions = 64
+	handlers := make([]*ProtoMessageHandler, sessions)
+	for i := 0; i < sessions; i++ {
+		handlers[i] = &ProtoMessageHandler{
+			server:         &ConnectNodeServer{sharedWriter: manager},
+			writeSessionID: uint64(i + 1),
+		}
+	}
+
+	var cursor uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			idx := atomic.AddUint64(&cursor, 1)
+			h := handlers[idx%uint64(len(handlers))]
+			if err := h.writeProto(nil, &proto.Proto{Op: 2, Seq: int32(idx)}, "broadcast"); err != nil {
+				b.Fatalf("writeProto failed: %v", err)
+			}
+		}
+	})
+}
