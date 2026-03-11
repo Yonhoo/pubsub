@@ -1,6 +1,6 @@
 # Story 2.1: 共享写路径唯一化
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,14 +19,14 @@ so that 我可以消除旧路径分叉和重复调度。
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: 清理旧写路径分叉（AC: #1, #2）
-  - [ ] Subtask 1.1: 移除 `writeProto()` 中的旧直写 fallback
-  - [ ] Subtask 1.2: 清理不再使用的旧写入辅助函数
+- [x] Task 1: 清理旧写路径分叉（AC: #1, #2）
+  - [x] Subtask 1.1: 移除 `writeProto()` 中的旧直写 fallback
+  - [x] Subtask 1.2: 清理不再使用的旧写入辅助函数
 
-- [ ] Task 2: 补充回归验证（AC: #1, #3）
-  - [ ] Subtask 2.1: 增加单测锁住“无 shared writer 时返回错误而非直写”的行为
-  - [ ] Subtask 2.2: 运行 `go test ./connect-node/...`
-  - [ ] Subtask 2.3: 运行 `go test -race ./connect-node/...`
+- [x] Task 2: 补充回归验证（AC: #1, #3）
+  - [x] Subtask 2.1: 增加单测锁住“无 shared writer 时返回错误而非直写”的行为
+  - [x] Subtask 2.2: 运行 `go test ./connect-node/...`
+  - [x] Subtask 2.3: 运行 `go test -race ./connect-node/...`
 
 ## Dev Notes
 
@@ -51,11 +51,17 @@ Amelia-context / create-story
 
 ### Debug Log References
 
-- 待开发阶段填充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.029s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.046s`
 
 ### Completion Notes List
 
-- 待开发阶段填充
+- 已移除 `writeProto()` 的 `session.WritePkg` 直写兜底，响应/广播写入统一要求通过 shared writer manager。
+- 已删除不再使用的旧写入辅助函数，减少分叉路径残留。
+- 已新增 `server_websocket_test.go`，锁住“无 shared writer 时返回错误而非回退直写”的行为。
+- 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
 
 ### File List
 
@@ -65,3 +71,4 @@ Amelia-context / create-story
 ## Change Log
 
 - 2026-03-11: 创建 Story 2.1 开发上下文，状态设为 `ready-for-dev`。
+- 2026-03-11: 完成共享写路径唯一化改造并补充回归测试，状态更新为 `review`。
