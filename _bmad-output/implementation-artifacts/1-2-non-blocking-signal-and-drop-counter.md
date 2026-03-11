@@ -1,6 +1,6 @@
 # Story 1.2: Signal 非阻塞化与丢弃计数
 
-Status: in-progress
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -62,9 +62,9 @@ Amelia-context / create-story
 ### Debug Log References
 
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
-- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.035s`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.014s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
-- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.038s`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.041s`
 
 ### Completion Notes List
 
@@ -72,6 +72,8 @@ Amelia-context / create-story
 - signal drop 计数已与业务 `Push` 丢弃计数拆分，新增 per-channel / global 可读接口。
 - 新增 `channel_test.go`，覆盖“signal 满不阻塞”与“ready 合并不丢 ring 中请求”两个关键语义。
 - 使用指定 Go 工具链执行 `go test` 与 `go test -race` 均通过。
+- 已修复 code review 阻塞项：ready 现在与广播/finish 使用独立通道，不再把“任意 signal 消息占用”误判为可合并 ready。
+- 新增回归测试覆盖“广播已占用 signal 时，ready 仍可送达且队列请求不会滞留”。
 
 ### File List
 
@@ -83,6 +85,7 @@ Amelia-context / create-story
 - 2026-03-10: 创建 Story 1.2 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-10: 完成 `Signal` 非阻塞化、signal drop 计数拆分与回归测试，状态更新为 `review`。
 - 2026-03-10: 执行 `/bmad-bmm-code-review`，发现阻塞级问题，状态回退为 `in-progress`。
+- 2026-03-10: 修复 ready 与广播复用通道导致的唯一唤醒丢失问题，状态推进回 `review`。
 
 ## Senior Developer Review (AI)
 
@@ -108,3 +111,8 @@ Changes Requested
 - 可选方向：
   - 为 ready 建立独立的待处理标记/单独通道；
   - 或在 dispatch 处理完非-ready 消息后补检查 `ClientReqQueue`，确保不会因 ready 丢弃而饿死队列。
+
+### Resolution
+
+- 已采用“独立 ready 通道”方案，`Signal()` 仅向 `ready` 通道做非阻塞发送，广播/finish 继续走 `signal` 通道。
+- `Ready()` 统一从两个通道选择事件，因此只有“已有待消费 ready”时才会发生 ready 合并，不再受广播消息占用影响。
