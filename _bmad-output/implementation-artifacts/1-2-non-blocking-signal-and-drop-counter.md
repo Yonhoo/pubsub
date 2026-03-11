@@ -1,6 +1,6 @@
 # Story 1.2: Signal 非阻塞化与丢弃计数
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -86,12 +86,13 @@ Amelia-context / create-story
 - 2026-03-10: 完成 `Signal` 非阻塞化、signal drop 计数拆分与回归测试，状态更新为 `review`。
 - 2026-03-10: 执行 `/bmad-bmm-code-review`，发现阻塞级问题，状态回退为 `in-progress`。
 - 2026-03-10: 修复 ready 与广播复用通道导致的唯一唤醒丢失问题，状态推进回 `review`。
+- 2026-03-10: 复审通过，Story 状态更新为 `done`。
 
 ## Senior Developer Review (AI)
 
 ### Review Outcome
 
-Changes Requested
+Approve
 
 ### Review Date
 
@@ -99,11 +100,11 @@ Changes Requested
 
 ### Findings (Severity Ordered)
 
-- High: `Signal()` 在 `c.signal` 已被广播消息占用时直接丢弃 ready，会导致 `ClientReqQueue` 中已入队请求缺少后续唤醒，可能一直滞留到下一次偶发 signal/broadcast 才被处理，违反 AC #3。相关位置：`/mnt/pubsub/connect-node/channel.go`、`/mnt/pubsub/connect-node/server_websocket.go`。
+- 无 High/Medium/Low 级缺陷。
 
 ### Blocking Issues
 
-- `Signal` 的“允许合并”只在已有 `ProtoReady` 待消费时成立；当前实现把“任意通道占用”都视为可合并，遗漏了 `ProtoReady` 与广播/finish 共用同一信号通道的语义差异。
+- 无。
 
 ### Recommended Fix Direction
 
@@ -116,3 +117,8 @@ Changes Requested
 
 - 已采用“独立 ready 通道”方案，`Signal()` 仅向 `ready` 通道做非阻塞发送，广播/finish 继续走 `signal` 通道。
 - `Ready()` 统一从两个通道选择事件，因此只有“已有待消费 ready”时才会发生 ready 合并，不再受广播消息占用影响。
+
+### Residual Risks / Testing Gaps
+
+- `Close()` 仍是阻塞发送，这属于 Story 1.3 的既有范围，不是本 Story 新引入的问题。
+- 当前测试已覆盖 reviewer 指出的广播占位场景；更高强度的关闭并发语义验证仍应在 Story 1.3 补齐。
