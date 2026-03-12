@@ -1,6 +1,6 @@
 # Story 2.3b: churn 路径画像与优化验证
 
-Status: backlog
+Status: ready-for-dev
 
 <!-- Note: This is a backlog story created from ongoing Epic 2 performance analysis. -->
 
@@ -72,6 +72,7 @@ Amelia-context / backlog-story
 ### Completion Notes List
 
 - 2026-03-12: 新增 Epic 2 backlog story，用于补齐 churn 路径的 benchmark / pprof 基线。
+- 2026-03-12: Story 2.3b 正式进入开发准备，状态更新为 `ready-for-dev`。
 
 ### File List
 
@@ -82,3 +83,4 @@ Amelia-context / backlog-story
 ## Change Log
 
 - 2026-03-12: 新增 Epic 2 backlog story，补齐高 churn 连接/房间路径的性能画像与优化验证空间。
+- 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
