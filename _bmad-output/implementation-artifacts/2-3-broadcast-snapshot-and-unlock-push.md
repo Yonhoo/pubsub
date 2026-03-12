@@ -1,6 +1,6 @@
 # Story 2.3: 广播快照后解锁推送
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -82,3 +82,31 @@ Amelia-context / dev-story
 - 2026-03-11: 创建 Story 2.3 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成广播快照后解锁推送改造并补充回归测试，状态更新为 `review`。
 - 2026-03-12: 补充 broadcast 高并发 benchmark 与 `pprof` 验证，Story 状态保持 `review`。
+- 2026-03-12: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-12
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- “锁内快照、锁外 Push” 语义已正确落地。`Bucket.Broadcast` 仅在 `broadcastSnapshot()` 中持有 `bucket.cLock`，随后在锁外执行 `NeedPush`、room 过滤和 `Push`，回归测试已经锁住“push 期间全局锁已释放”的行为。
+- room / op 过滤行为没有回归。现有测试覆盖了 `NeedPush(op)` 和 `Roomid` 过滤的组合场景，足以支撑 Story 2.3 范围内的正确性结论。
+- benchmark / `pprof` 足以说明画像变化方向：
+  - 锁竞争收敛目标达成，热点落在 `Broadcast` / `broadcastSnapshot` / `NeedPush` / `Push`
+  - 代价转移到了 snapshot 分配/copy，且该 trade-off 已被单独登记为后续 Story 2.3a
+- 未发现新的行为回归。本 Story 只缩小了全局锁持有范围，没有改变广播的对外功能语义。
+
+### Residual Risks / Testing Gaps
+
+- 当前 `broadcastSnapshot()` 仍为每次广播分配新的 channel 切片，内存/拷贝成本在超高并发下较突出；这已由后续 Story 2.3a 接管，不构成 Story 2.3 的阻塞问题。
