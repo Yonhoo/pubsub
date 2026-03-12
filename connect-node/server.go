@@ -22,6 +22,7 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/protocol/controller"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"github.com/zhenjl/cityhash"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"log"
@@ -66,7 +67,19 @@ type ConnectNodeServer struct {
 	roomWorkers              []chan *push.BroadcastRoomReq
 	roomWorkerNum            uint32
 	roomWorkerEnqueueTimeout time.Duration
+	leaveQueue               chan *leaveTask
+	leaveWorkerNum           uint32
+	leavePendingMu           sync.Mutex
+	leavePending             map[string]struct{}
 	stopOnce                 sync.Once
+}
+
+type leaveTask struct {
+	key       string
+	userID    string
+	roomID    string
+	attempts  int
+	enqueuedAt time.Time
 }
 
 // NewConnectNodeServer 创建连接节点服务器
@@ -111,6 +124,7 @@ func NewConnectNodeServer(
 		bucketIdx:                uint32(cfg.Bucket.Size),
 		round:                    NewRound(cfg),
 		roomWorkerEnqueueTimeout: roomWorkerEnqueueTimeout,
+		leavePending:             make(map[string]struct{}),
 		stopRoomSync:             make(chan struct{}),
 	}
 
@@ -127,6 +141,7 @@ func NewConnectNodeServer(
 		server.buckets[i] = NewBucket(cfg.Bucket)
 	}
 	server.initRoomWorkers(cfg.Bucket.RoutineAmount, cfg.Bucket.RoutineSize)
+	server.initLeaveWorkers(cfg.Bucket.RoutineAmount, cfg.Bucket.RoutineSize)
 
 	go server.onlineproc()
 
@@ -138,6 +153,11 @@ func (s *ConnectNodeServer) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
+		if s.leaveQueue != nil {
+			close(s.leaveQueue)
+			s.leaveQueue = nil
+			s.leaveWorkerNum = 0
+		}
 		for _, ch := range s.roomWorkers {
 			if ch != nil {
 				close(ch)
@@ -166,6 +186,111 @@ func (s *ConnectNodeServer) initRoomWorkers(workerNum uint64, queueSize int) {
 		s.roomWorkers[i] = ch
 		go s.roomBroadcastProc(ch)
 	}
+}
+
+func leaveDedupKey(roomID, userID string) string {
+	return roomID + ":" + userID
+}
+
+func (s *ConnectNodeServer) initLeaveWorkers(workerNum uint64, queueSize int) {
+	if workerNum == 0 {
+		workerNum = 1
+	}
+	if queueSize <= 0 {
+		queueSize = 1024
+	}
+	s.leaveQueue = make(chan *leaveTask, queueSize)
+	s.leaveWorkerNum = uint32(workerNum)
+	for i := uint64(0); i < workerNum; i++ {
+		go s.leaveWorkerProc(s.leaveQueue)
+	}
+}
+
+func (s *ConnectNodeServer) leaveWorkerProc(ch <-chan *leaveTask) {
+	for task := range ch {
+		if task == nil {
+			continue
+		}
+		s.processLeaveTask(task)
+	}
+}
+
+func (s *ConnectNodeServer) EnqueueLeave(userID, roomID string) error {
+	if s == nil || userID == "" || roomID == "" {
+		return nil
+	}
+	key := leaveDedupKey(roomID, userID)
+	s.leavePendingMu.Lock()
+	if _, ok := s.leavePending[key]; ok {
+		s.leavePendingMu.Unlock()
+		return nil
+	}
+	s.leavePending[key] = struct{}{}
+	s.leavePendingMu.Unlock()
+
+	task := &leaveTask{
+		key:        key,
+		userID:     userID,
+		roomID:     roomID,
+		enqueuedAt: time.Now(),
+	}
+
+	var (
+		enqueueCtx context.Context
+		cancel     context.CancelFunc
+	)
+	if s.roomWorkerEnqueueTimeout > 0 {
+		enqueueCtx, cancel = context.WithTimeout(context.Background(), s.roomWorkerEnqueueTimeout)
+		defer cancel()
+	} else {
+		enqueueCtx = context.Background()
+	}
+
+	select {
+	case s.leaveQueue <- task:
+		return nil
+	case <-enqueueCtx.Done():
+		s.leavePendingMu.Lock()
+		delete(s.leavePending, key)
+		s.leavePendingMu.Unlock()
+		return enqueueCtx.Err()
+	}
+}
+
+func (s *ConnectNodeServer) processLeaveTask(task *leaveTask) {
+	defer func() {
+		s.leavePendingMu.Lock()
+		delete(s.leavePending, task.key)
+		s.leavePendingMu.Unlock()
+	}()
+	if s.controllerClient == nil {
+		wsLog("⚠️  [LeaveQueue] controller client unavailable user=%s room=%s", task.userID, task.roomID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+	resp, err := s.controllerClient.LeaveRoom(ctx, &controller.LeaveRoomRequest{
+		UserId: task.userID,
+		RoomId: task.roomID,
+	}, grpc.WaitForReady(true))
+	elapsed := time.Since(startTime)
+	task.attempts++
+
+	if err != nil {
+		wsLog("❌ [LeaveQueue] LeaveRoom 失败 user=%s room=%s attempts=%d elapsed=%v err=%v",
+			task.userID, task.roomID, task.attempts, elapsed, err)
+		return
+	}
+	if resp != nil {
+		wsLog("✅ [LeaveQueue] LeaveRoom 成功 user=%s room=%s attempts=%d elapsed=%v",
+			task.userID, task.roomID, task.attempts, elapsed)
+		return
+	}
+	wsLog("⚠️  [LeaveQueue] LeaveRoom 返回 nil user=%s room=%s attempts=%d elapsed=%v",
+		task.userID, task.roomID, task.attempts, elapsed)
 }
 
 func (s *ConnectNodeServer) roomBroadcastProc(ch chan *push.BroadcastRoomReq) {

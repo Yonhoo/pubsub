@@ -551,8 +551,8 @@ func (h *ProtoMessageHandler) closeSessionResources() {
 	})
 }
 
-// cleanupUser 清理用户（调用 Controller.LeaveRoom 并从 Bucket/Room 中移除）
-// 只有在用户已认证（已加入房间）时才调用
+// cleanupUser 先做本地解绑，再把 LeaveRoom 交给异步队列。
+// Join 仍保持同步确认；只有 Leave 改为异步化。
 func (h *ProtoMessageHandler) cleanupUser() {
 	h.rwlock.RLock()
 	auth := h.auth
@@ -568,29 +568,12 @@ func (h *ProtoMessageHandler) cleanupUser() {
 
 	if bucket != nil && channel != nil {
 		bucket.Del(channel)
+		channel.Room = nil
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	leaveRoomRequest := &controller.LeaveRoomRequest{
-		UserId: userId,
-		RoomId: roomId,
-	}
-
-	startTime := time.Now()
-	resp, err := h.server.controllerClient.LeaveRoom(ctx, leaveRoomRequest,
-		grpc.WaitForReady(true))
-	elapsed := time.Since(startTime)
-
-	if err != nil {
-		wsLog("❌ [ProtoHandler] LeaveRoom 失败 user=%s room=%s elapsed=%v err=%v", userId, roomId, elapsed, err)
-		return
-	}
-	if resp != nil {
-		wsLog("✅ [ProtoHandler] LeaveRoom 成功 user=%s room=%s elapsed=%v", userId, roomId, elapsed)
-	} else {
-		wsLog("⚠️  [ProtoHandler] LeaveRoom 返回 nil user=%s room=%s", userId, roomId)
+	if h.server != nil {
+		if err := h.server.EnqueueLeave(userId, roomId); err != nil {
+			wsLog("⚠️  [ProtoHandler] LeaveRoom 入队失败 user=%s room=%s err=%v", userId, roomId, err)
+		}
 	}
 }
 

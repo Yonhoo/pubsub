@@ -18,13 +18,17 @@ import (
 
 type stubControllerClient struct {
 	joinRoomFn func(ctx context.Context, in *controller.JoinRoomRequest, opts ...grpc.CallOption) (*controller.JoinRoomResponse, error)
+	leaveRoomFn func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error)
 }
 
 func (s *stubControllerClient) JoinRoom(ctx context.Context, in *controller.JoinRoomRequest, opts ...grpc.CallOption) (*controller.JoinRoomResponse, error) {
 	return s.joinRoomFn(ctx, in, opts...)
 }
 
-func (s *stubControllerClient) LeaveRoom(context.Context, *controller.LeaveRoomRequest, ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+func (s *stubControllerClient) LeaveRoom(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+	if s.leaveRoomFn != nil {
+		return s.leaveRoomFn(ctx, in, opts...)
+	}
 	return nil, nil
 }
 
@@ -57,6 +61,33 @@ func newJoinTestHandler(client controller.ControllerServiceClient) *ProtoMessage
 		channel:        ch,
 		writeSessionID: 21,
 	}
+}
+
+func newLeaveTestHandler(client controller.ControllerServiceClient) *ProtoMessageHandler {
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8, RoutineAmount: 1, RoutineSize: 8}
+	server := &ConnectNodeServer{
+		nodeID:                   "node-1",
+		controllerClient:         client,
+		buckets:                  []*Bucket{NewBucket(bucketCfg)},
+		bucketIdx:                1,
+		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
+		leavePending:             make(map[string]struct{}),
+	}
+	server.initLeaveWorkers(1, 8)
+	ch := NewChannel(8, 8)
+	ch.Key = "leave-user"
+	h := &ProtoMessageHandler{
+		server:  server,
+		channel: ch,
+		bucket:  server.buckets[0],
+		roomId:  "room-leave",
+		clientId: "user-leave",
+		auth:    true,
+	}
+	if err := h.bucket.Put(h.roomId, h.channel); err != nil {
+		panic(err)
+	}
+	return h
 }
 
 func TestWriteProtoRequiresSharedWriter(t *testing.T) {
@@ -295,6 +326,72 @@ func TestJoinRoomFailureReturnsErrorAckWithoutRoomMutation(t *testing.T) {
 	if h.channel.NeedPush(2) {
 		t.Fatal("expected join failure to not register watch op=2")
 	}
+}
+
+func TestCleanupUserUnbindsLocallyBeforeAsyncLeaveCompletes(t *testing.T) {
+	releaseLeave := make(chan struct{})
+	leaveCalled := make(chan struct{}, 1)
+	h := newLeaveTestHandler(&stubControllerClient{
+		leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			leaveCalled <- struct{}{}
+			<-releaseLeave
+			return &controller.LeaveRoomResponse{}, nil
+		},
+	})
+
+	start := time.Now()
+	h.cleanupUser()
+	elapsed := time.Since(start)
+
+	select {
+	case <-leaveCalled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected LeaveRoom to be dispatched asynchronously")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("expected cleanupUser to return quickly, took %v", elapsed)
+	}
+	if got := h.bucket.ChannelCount(); got != 0 {
+		t.Fatalf("expected local bucket cleanup before leave completes, got %d channels", got)
+	}
+	if h.channel.Room != nil {
+		t.Fatalf("expected local channel room cleared, got %#v", h.channel.Room)
+	}
+
+	close(releaseLeave)
+	h.server.Stop()
+}
+
+func TestLeaveQueueDeduplicatesRoomUserKey(t *testing.T) {
+	leaveCalls := atomic.Int32{}
+	releaseLeave := make(chan struct{})
+	client := &stubControllerClient{
+		leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			leaveCalls.Add(1)
+			<-releaseLeave
+			return &controller.LeaveRoomResponse{}, nil
+		},
+	}
+	server := &ConnectNodeServer{
+		controllerClient:         client,
+		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
+		leavePending:             make(map[string]struct{}),
+	}
+	server.initLeaveWorkers(1, 8)
+
+	if err := server.EnqueueLeave("user-x", "room-x"); err != nil {
+		t.Fatalf("first enqueue failed: %v", err)
+	}
+	if err := server.EnqueueLeave("user-x", "room-x"); err != nil {
+		t.Fatalf("dedup enqueue failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := leaveCalls.Load(); got != 1 {
+		t.Fatalf("expected one LeaveRoom call for dedup key, got %d", got)
+	}
+
+	close(releaseLeave)
+	server.Stop()
 }
 
 func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {
