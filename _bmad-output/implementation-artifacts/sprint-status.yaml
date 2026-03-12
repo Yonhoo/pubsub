@@ -49,7 +49,7 @@ development_status:
   epic-3: backlog
   3-1-preserve-sync-join-semantics: done
   3-2-async-leave-queue-and-dedup: done
-  3-3-leave-retry-and-alerting: backlog
+  3-3-leave-retry-and-alerting: ready-for-dev
   epic-3-retrospective: optional
 
   epic-4: backlog
