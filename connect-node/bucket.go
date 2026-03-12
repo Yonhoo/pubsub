@@ -19,6 +19,8 @@ type Bucket struct {
 
 	lastPushErrLogNano  int64
 	lastRoomMissLogNano int64
+
+	snapshotPool sync.Pool
 }
 
 func NewBucket(c *config.BucketConfig) (b *Bucket) {
@@ -28,6 +30,10 @@ func NewBucket(c *config.BucketConfig) (b *Bucket) {
 	b.ipCnts = make(map[string]int32)
 	b.c = c
 	b.rooms = make(map[string]*Room, c.Room)
+	b.snapshotPool.New = func() any {
+		chs := make([]*Channel, 0, c.Channel)
+		return &chs
+	}
 	return
 }
 
@@ -163,14 +169,33 @@ func (b *Bucket) Channel(key string) (ch *Channel) {
 	return
 }
 
-func (b *Bucket) broadcastSnapshot() []*Channel {
+func (b *Bucket) broadcastSnapshot() ([]*Channel, func()) {
+	bufp, _ := b.snapshotPool.Get().(*[]*Channel)
+	if bufp == nil {
+		chs := make([]*Channel, 0, b.c.Channel)
+		bufp = &chs
+	}
+
 	b.cLock.RLock()
-	snapshot := make([]*Channel, 0, len(b.chs))
+	snapshot := (*bufp)[:0]
+	if cap(snapshot) < len(b.chs) {
+		snapshot = make([]*Channel, 0, len(b.chs))
+	}
 	for _, ch := range b.chs {
 		snapshot = append(snapshot, ch)
 	}
 	b.cLock.RUnlock()
-	return snapshot
+
+	*bufp = snapshot
+	release := func() {
+		for i := range snapshot {
+			snapshot[i] = nil
+		}
+		*bufp = snapshot[:0]
+		b.snapshotPool.Put(bufp)
+	}
+
+	return snapshot, release
 }
 
 func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
@@ -179,7 +204,10 @@ func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
 	skippedByOp := 0
 	skippedByRoom := 0
 
-	for _, ch = range b.broadcastSnapshot() {
+	snapshot, release := b.broadcastSnapshot()
+	defer release()
+
+	for _, ch = range snapshot {
 		if !ch.NeedPush(op) {
 			skippedByOp++
 			continue
