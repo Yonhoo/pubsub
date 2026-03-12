@@ -1,6 +1,6 @@
 # Story 2.3a: broadcast snapshot 分配成本优化/验证
 
-Status: backlog
+Status: ready-for-dev
 
 <!-- Note: This is a backlog story created from Story 2.3 profiling follow-up. -->
 
@@ -72,6 +72,7 @@ Amelia-context / backlog-story
 ### Completion Notes List
 
 - 2026-03-12: 基于 Story 2.3 profiling 结果新增 backlog story，尚未进入实现阶段。
+- 2026-03-12: Story 2.3a 正式进入开发准备，状态更新为 `ready-for-dev`。
 
 ### File List
 
@@ -81,3 +82,4 @@ Amelia-context / backlog-story
 ## Change Log
 
 - 2026-03-12: 新增 Epic 2 backlog story，补足 broadcast snapshot allocation trade-off 的后续优化/验证空间。
+- 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
