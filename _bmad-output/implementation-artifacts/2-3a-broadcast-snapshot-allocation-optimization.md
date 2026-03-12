@@ -1,6 +1,6 @@
 # Story 2.3a: broadcast snapshot 分配成本优化/验证
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: This is a backlog story created from Story 2.3 profiling follow-up. -->
 
@@ -63,23 +63,36 @@ so that 我可以在维持低锁竞争的同时，控制 snapshot 带来的 memo
 
 ### Agent Model Used
 
-Amelia-context / backlog-story
+Amelia-context / dev-story
 
 ### Debug Log References
 
-- 待后续开发阶段补充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.053s`
+- `GO_BIN=/home/node/.local/go/bin/go /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-3a/run-broadcast-allocation-benchmark.sh`
+- 结果：
+  - `BenchmarkBroadcastSnapshotOptimizedParallel-16 426126 2803 ns/op 56 B/op 2 allocs/op`
+  - `BenchmarkBroadcastSnapshotOptimizedRoomFilteredParallel-16 463515 2594 ns/op 64 B/op 3 allocs/op`
 
 ### Completion Notes List
 
 - 2026-03-12: 基于 Story 2.3 profiling 结果新增 backlog story，尚未进入实现阶段。
 - 2026-03-12: Story 2.3a 正式进入开发准备，状态更新为 `ready-for-dev`。
+- 已将 `broadcastSnapshot` 改为复用切片缓冲，减少超高并发广播下的 snapshot 分配成本。
+- 已补充高 fan-out broadcast benchmark 与 CPU / memory / mutex / block `pprof`。
+- 当前量化结果表明：在 1024 fan-out 场景下，snapshot 路径维持锁范围语义不变，同时 alloc/op 已降到双位数 B/op 量级。
+- 已使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...`，结果通过。
 
 ### File List
 
 - /mnt/pubsub/connect-node/bucket.go
 - /mnt/pubsub/connect-node/bucket_test.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-3a/run-broadcast-allocation-benchmark.sh
 
 ## Change Log
 
 - 2026-03-12: 新增 Epic 2 backlog story，补足 broadcast snapshot allocation trade-off 的后续优化/验证空间。
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-12: 完成 snapshot allocation 优化、benchmark 与 `pprof` 验证，状态更新为 `review`。
