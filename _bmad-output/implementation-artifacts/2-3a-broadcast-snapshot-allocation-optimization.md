@@ -1,6 +1,6 @@
 # Story 2.3a: broadcast snapshot 分配成本优化/验证
 
-Status: review
+Status: done
 
 <!-- Note: This is a backlog story created from Story 2.3 profiling follow-up. -->
 
@@ -96,3 +96,29 @@ Amelia-context / dev-story
 - 2026-03-12: 新增 Epic 2 backlog story，补足 broadcast snapshot allocation trade-off 的后续优化/验证空间。
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-12: 完成 snapshot allocation 优化、benchmark 与 `pprof` 验证，状态更新为 `review`。
+- 2026-03-12: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-12
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- `snapshotPool` 复用边界正确。snapshot 切片在 `Broadcast()` 中获取、使用并通过 `release()` 归还；归还前显式清空元素，避免旧 channel 指针在复用时造成数据污染。
+- 并发语义未回退。`broadcastSnapshot()` 仍然只在快照阶段持有 `bucket.cLock`，`NeedPush` / room 过滤 / `Push` 继续在锁外执行，符合 Story 2.3 的架构边界。
+- benchmark / `pprof` 足以支撑“allocation/copy 成本下降”的结论。高 fan-out benchmark 的 alloc/op 已降到双位数 `B/op`，memory profile 也显示 `broadcastSnapshot` 仍是主要残余热点，但总 alloc_space 已显著收缩。
+- 未发现新的行为回归。本 Story 只优化 snapshot 缓冲复用，并未改变广播过滤和 push 的对外功能语义。
+
+### Residual Risks / Testing Gaps
+
+- `snapshotPool` 可能保留较大 capacity 的切片缓冲，从而在极端峰值 fan-out 后维持较高驻留内存；这属于典型池化 trade-off，目前没有迹象表明会影响正确性，可在后续按需要再决定是否加上容量裁剪策略。
