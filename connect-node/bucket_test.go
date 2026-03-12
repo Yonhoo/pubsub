@@ -268,3 +268,29 @@ func BenchmarkBroadcastSnapshotRoomFilteredParallel(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkBroadcastSnapshotOptimizedParallel(b *testing.B) {
+	bucket := newBroadcastBenchmarkBucket(1024, "", false)
+	msg := &proto.Proto{Op: 1}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			bucket.Broadcast(msg, 1)
+		}
+	})
+}
+
+func BenchmarkBroadcastSnapshotOptimizedRoomFilteredParallel(b *testing.B) {
+	bucket := newBroadcastBenchmarkBucket(1024, "room-a", true)
+	msg := &proto.Proto{Op: 1, Roomid: "room-a"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			bucket.Broadcast(msg, 1)
+		}
+	})
+}
