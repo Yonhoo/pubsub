@@ -58,6 +58,10 @@ Amelia-context / dev-story
 - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
 - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.054s`
+- `GO_BIN=/home/node/.local/go/bin/go /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-3/run-broadcast-benchmark.sh`
+- 结果：
+  - `BenchmarkBroadcastSnapshotParallel-16 629302 1676 ns/op 2312 B/op 2 allocs/op`
+  - `BenchmarkBroadcastSnapshotRoomFilteredParallel-16 677398 1616 ns/op 2304 B/op 1 allocs/op`
 
 ### Completion Notes List
 
@@ -65,13 +69,16 @@ Amelia-context / dev-story
 - 已将 `Bucket.Broadcast` 调整为锁内只做 channel 快照，`NeedPush` / room 过滤 / `Push` 均在锁外执行。
 - 已新增回归测试，验证 push 期间 `bucket.cLock` 已释放，且 room / op 过滤行为不回归。
 - 使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...` 均通过。
+- 已补充高并发 broadcast benchmark 与 CPU / memory / mutex / block `pprof`，用于观察 snapshot 与锁外 push 路径的热点。
 
 ### File List
 
 - /mnt/pubsub/connect-node/bucket.go
 - /mnt/pubsub/connect-node/bucket_test.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-3/run-broadcast-benchmark.sh
 
 ## Change Log
 
 - 2026-03-11: 创建 Story 2.3 开发上下文，状态设为 `ready-for-dev`。
 - 2026-03-11: 完成广播快照后解锁推送改造并补充回归测试，状态更新为 `review`。
+- 2026-03-12: 补充 broadcast 高并发 benchmark 与 `pprof` 验证，Story 状态保持 `review`。
