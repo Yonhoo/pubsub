@@ -1,6 +1,6 @@
 # Story 2.3b: churn 路径画像与优化验证
 
-Status: review
+Status: done
 
 <!-- Note: This is a backlog story created from ongoing Epic 2 performance analysis. -->
 
@@ -98,4 +98,32 @@ Amelia-context / dev-story
 - 2026-03-12: 新增 Epic 2 backlog story，补齐高 churn 连接/房间路径的性能画像与优化验证空间。
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-12: 完成 churn benchmark 与 `pprof` 基线，状态更新为 `review`。
+- 2026-03-12: 执行 `/bmad-bmm-code-review`，结论 Approve，Story 状态更新为 `done`。
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-12
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- `Put` / `Del` / `ChangeRoom` 的 benchmark 足以代表高 churn 场景。三类路径被拆开建模，并以 `RunParallel` 放大了并发结构变更成本，能够为后续优化提供可操作的基线。
+- CPU / memory / mutex / block 画像已经足以支撑下一步决策：
+  - `Put` / `Del` 的分配热点主要在 `NewChannel`
+  - `ChangeRoom` 相对更轻，但锁竞争与阻塞画像明确
+  - mutex / block profile 已经清楚暴露出 churn 期间的锁竞争特征
+- 未发现行为回归。该 Story 仅新增 benchmark / profiling 代码和 runner，没有修改 bucket / room / channel 的产品语义。
+
+### Residual Risks / Testing Gaps
+
+- 当前 benchmark 偏向 synthetic churn 压力模型，而不是完整端到端连接生命周期；这对“热点定位”和“相对优化比较”已经足够，但如果后续要逼近生产流量模型，可再补一层更接近真实会话生命周期的混合场景基准。
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
