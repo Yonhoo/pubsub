@@ -1,6 +1,6 @@
 # Story 3.2: Leave 异步队列与去重
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -44,3 +44,34 @@ so that 连接风暴时关闭路径不会被控制面调用拖慢。
 ## Change Log
 
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-12: Leave 改为本地解绑后异步入队，补充 `room:user` 去重和回归测试，状态更新为 `review`。
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Amelia-context / dev-story
+
+### Debug Log References
+
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.133s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.159s`
+
+### Completion Notes List
+
+- 在 `ConnectNodeServer` 中新增 Leave queue / worker，并使用 `room:user` 作为 pending 去重键。
+- `cleanupUser` 改为先做本地 bucket/channel 解绑，再异步入队 `LeaveRoom`。
+- `leaveTask` 中保留 `attempts` / `enqueuedAt` 等基础字段，为后续 Story 3.3 的重试治理预留结构。
+- 新增回归测试覆盖：
+  - 本地解绑先于异步 Leave 完成
+  - 同一 `room:user` 不会重复排队
+  - Join 同步语义测试继续通过，未被 Leave 改造破坏
+
+### File List
+
+- /mnt/pubsub/connect-node/server.go
+- /mnt/pubsub/connect-node/server_websocket.go
+- /mnt/pubsub/connect-node/server_websocket_test.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/3-2-async-leave-queue-and-dedup.md
