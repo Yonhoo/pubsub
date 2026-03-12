@@ -245,6 +245,25 @@ So that 我可以降低全局锁竞争并提升广播稳定性。
 **Then** 推送路径不在全局锁内执行  
 **And** `bucket.cLock` 阻塞样本下降满足阈值
 
+### Story 2.3a: broadcast snapshot 分配成本优化/验证
+As a 性能工程师,  
+I want 针对超高并发广播下 `broadcastSnapshot` 的分配/拷贝成本进行优化或验证,  
+So that 我可以在维持低锁竞争的同时，控制 snapshot 带来的 memory/copy 开销转移。
+
+**Covers:** FR11, FR20, NFR1, NFR3, NFR14
+
+**Acceptance Criteria:**
+
+**Given** Story 2.3 已完成“锁内快照、锁外推送”  
+**When** 执行超高并发广播 benchmark 与 profiling  
+**Then** 可以量化 `broadcastSnapshot` 的 allocation/copy 成本占比  
+**And** 输出是否需要进一步优化以及不回退锁范围语义的结论
+
+**Notes:**
+
+- 本 Story 关注 Story 2.3 之后显现的 memory/copy trade-off，而不是回到锁内 push。  
+- 它是 2.3 的后续 profiling/优化 story，不要求与 2.3 同轮实现。
+
 ### Story 2.4: 队列满场景失败语义与可观测
 As a 运维工程师,  
 I want 队列满时有明确失败语义和限流日志,  
