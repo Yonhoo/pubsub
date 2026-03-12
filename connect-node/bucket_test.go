@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -221,4 +222,49 @@ func TestBroadcastSnapshotPreservesRoomAndOpFiltering(t *testing.T) {
 	if got := atomic.LoadInt32(&wrongRoom); got != 0 {
 		t.Fatalf("expected wrong-room channel to receive 0 pushes, got %d", got)
 	}
+}
+
+func newBroadcastBenchmarkBucket(channelCount int, roomID string, filtered bool) *Bucket {
+	bucket := newTestBucket()
+	for i := 0; i < channelCount; i++ {
+		ch := NewChannel(1, 1)
+		ch.Key = fmt.Sprintf("bench-broadcast-%d", i)
+		ch.Watch(1)
+		ch.SetServerPushWriter(func(*proto.Proto) error { return nil })
+
+		targetRoom := roomID
+		if filtered && i%2 == 1 {
+			targetRoom = "other-room"
+		}
+		if err := bucket.Put(targetRoom, ch); err != nil {
+			panic(err)
+		}
+	}
+	return bucket
+}
+
+func BenchmarkBroadcastSnapshotParallel(b *testing.B) {
+	bucket := newBroadcastBenchmarkBucket(256, "", false)
+	msg := &proto.Proto{Op: 1}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			bucket.Broadcast(msg, 1)
+		}
+	})
+}
+
+func BenchmarkBroadcastSnapshotRoomFilteredParallel(b *testing.B) {
+	bucket := newBroadcastBenchmarkBucket(256, "room-a", true)
+	msg := &proto.Proto{Op: 1, Roomid: "room-a"}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			bucket.Broadcast(msg, 1)
+		}
+	})
 }
