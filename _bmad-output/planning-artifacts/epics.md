@@ -264,6 +264,25 @@ So that 我可以在维持低锁竞争的同时，控制 snapshot 带来的 memo
 - 本 Story 关注 Story 2.3 之后显现的 memory/copy trade-off，而不是回到锁内 push。  
 - 它是 2.3 的后续 profiling/优化 story，不要求与 2.3 同轮实现。
 
+### Story 2.3b: churn 路径画像与优化验证
+As a 性能工程师,  
+I want 针对 `Put` / `Del` / `ChangeRoom` 高频 churn 路径建立内存/锁/阻塞画像与优化验证,  
+So that 我可以补齐连接与房间变更路径的性能基线，而不只停留在广播路径。
+
+**Covers:** FR20, NFR1, NFR3, NFR14
+
+**Acceptance Criteria:**
+
+**Given** Epic 2 已建立写入与广播路径的 benchmark / profiling 基线  
+**When** 执行高 churn 的连接新增/删除与 room 变更 benchmark  
+**Then** 可以量化 churn 路径中的主要内存、锁和阻塞热点  
+**And** 输出是否值得进一步优化的 trade-off 结论
+
+**Notes:**
+
+- 本 Story 关注连接/房间结构变更路径，而不是广播 push 本身。  
+- 它属于 Epic 2 的后续性能验证 story，用于补齐 bucket/room 侧基线。
+
 ### Story 2.4: 队列满场景失败语义与可观测
 As a 运维工程师,  
 I want 队列满时有明确失败语义和限流日志,  
