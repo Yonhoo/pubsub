@@ -1,6 +1,6 @@
 # Story 3.1: Join 同步语义守护
 
-Status: review
+Status: done
 
 ## Story
 
@@ -38,6 +38,7 @@ so that 业务侧仍可即时判定入房成功/失败。
 
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-12: 新增 Join 同步语义回归测试与代码注释，状态更新为 `review`。
+- 2026-03-12: 执行 `/bmad-bmm-code-review`，结论 Approve，状态更新为 `done`。
 
 ## Dev Agent Record
 
@@ -64,3 +65,36 @@ Amelia-context / dev-story
 - /mnt/pubsub/connect-node/server_websocket.go
 - /mnt/pubsub/connect-node/server_websocket_test.go
 - /mnt/pubsub/_bmad-output/implementation-artifacts/3-1-preserve-sync-join-semantics.md
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-12
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- Join 成功 ack 仍然严格依赖控制面返回。
+  - 测试已经证明 `processClientRequest` 在 `JoinRoom` 返回前不会提前 enqueue 成功 ack。
+  - 成功链路中，本地 `room` 更新、`Watch(2)` 注册与成功响应保持同一同步确认链路。
+- 失败路径没有污染本地 `room/watch` 状态。
+  - `JoinRoom` 返回失败时，仍会立即发送错误 ack
+  - 但不会提前写入 `channel.Room`，也不会注册 `Watch(2)`
+- 回归测试足以覆盖 Story 3.1 的目标边界。
+  - 成功场景验证了“控制面返回前不 ack”
+  - 失败场景验证了“错误 ack + 无本地状态污染”
+- 未发现行为回归。
+  - 本 Story 没有改变 Join 的产品语义，只是把同步确认约束通过测试和注释显式化
+
+### Residual Risks / Testing Gaps
+
+- 当前测试聚焦 `processClientRequest`，不是完整 `OnMessage -> authWebsocket -> processClientRequest` 端到端链路。
+- 对 Story 3.1 而言这已足够，因为本 Story 要守住的是 Join 确认语义，而不是重新覆盖整个 websocket 生命周期。
