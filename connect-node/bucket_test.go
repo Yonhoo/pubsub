@@ -294,3 +294,103 @@ func BenchmarkBroadcastSnapshotOptimizedRoomFilteredParallel(b *testing.B) {
 		}
 	})
 }
+
+type churnSlot struct {
+	mu     sync.Mutex
+	ch     *Channel
+	roomID string
+	baseID string
+	altID  string
+}
+
+func BenchmarkBucketPutChurnParallel(b *testing.B) {
+	bucket := newTestBucket()
+	var seq uint64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			id := atomic.AddUint64(&seq, 1)
+			ch := NewChannel(1, 1)
+			ch.Key = fmt.Sprintf("put-churn-%d", id)
+			ch.IP = "127.0.0.1"
+			if err := bucket.Put("", ch); err != nil {
+				b.Fatalf("put failed: %v", err)
+			}
+			bucket.Del(ch)
+		}
+	})
+}
+
+func BenchmarkBucketDelChurnParallel(b *testing.B) {
+	bucket := newTestBucket()
+	slots := make([]*churnSlot, 512)
+	for i := range slots {
+		ch := NewChannel(1, 1)
+		ch.Key = fmt.Sprintf("del-churn-init-%d", i)
+		ch.IP = "127.0.0.1"
+		if err := bucket.Put("", ch); err != nil {
+			b.Fatalf("put failed: %v", err)
+		}
+		slots[i] = &churnSlot{ch: ch, roomID: ""}
+	}
+
+	var seq uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			id := atomic.AddUint64(&seq, 1)
+			slot := slots[id%uint64(len(slots))]
+			slot.mu.Lock()
+			bucket.Del(slot.ch)
+			replacement := NewChannel(1, 1)
+			replacement.Key = fmt.Sprintf("del-churn-%d", id)
+			replacement.IP = "127.0.0.1"
+			if err := bucket.Put(slot.roomID, replacement); err != nil {
+				slot.mu.Unlock()
+				b.Fatalf("replacement put failed: %v", err)
+			}
+			slot.ch = replacement
+			slot.mu.Unlock()
+		}
+	})
+}
+
+func BenchmarkBucketChangeRoomChurnParallel(b *testing.B) {
+	bucket := newTestBucket()
+	slots := make([]*churnSlot, 512)
+	for i := range slots {
+		roomA := fmt.Sprintf("change-room-a-%d", i)
+		roomB := fmt.Sprintf("change-room-b-%d", i)
+		ch := NewChannel(1, 1)
+		ch.Key = fmt.Sprintf("change-room-init-%d", i)
+		ch.IP = "127.0.0.1"
+		if err := bucket.Put(roomA, ch); err != nil {
+			b.Fatalf("put failed: %v", err)
+		}
+		slots[i] = &churnSlot{ch: ch, roomID: roomA, baseID: roomA, altID: roomB}
+	}
+
+	var seq uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			id := atomic.AddUint64(&seq, 1)
+			slot := slots[id%uint64(len(slots))]
+			slot.mu.Lock()
+			nextRoom := slot.altID
+			if slot.roomID == slot.altID {
+				nextRoom = slot.baseID
+			}
+			if err := bucket.ChangeRoom(nextRoom, slot.ch); err != nil {
+				slot.mu.Unlock()
+				b.Fatalf("change room failed: %v", err)
+			}
+			slot.roomID = nextRoom
+			slot.mu.Unlock()
+		}
+	})
+}
