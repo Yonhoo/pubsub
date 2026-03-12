@@ -1,6 +1,6 @@
 # Story 2.3b: churn 路径画像与优化验证
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: This is a backlog story created from ongoing Epic 2 performance analysis. -->
 
@@ -63,15 +63,27 @@ so that 我可以补齐连接与房间变更路径的性能基线，而不只停
 
 ### Agent Model Used
 
-Amelia-context / backlog-story
+Amelia-context / dev-story
 
 ### Debug Log References
 
-- 待后续开发阶段补充
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.061s`
+- `GO_BIN=/home/node/.local/go/bin/go /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-3b/run-churn-benchmark.sh`
+- 结果：
+  - `BenchmarkBucketPutChurnParallel-16 1961101 620.8 ns/op 636 B/op 9 allocs/op`
+  - `BenchmarkBucketDelChurnParallel-16 1691989 723.7 ns/op 635 B/op 9 allocs/op`
+  - `BenchmarkBucketChangeRoomChurnParallel-16 4534262 264.4 ns/op 64 B/op 1 allocs/op`
 
 ### Completion Notes List
 
 - 2026-03-12: 新增 Epic 2 backlog story，用于补齐 churn 路径的 benchmark / pprof 基线。
+- 2026-03-12: Story 2.3b 正式进入开发准备，状态更新为 `ready-for-dev`。
+- 已建立 `Put` / `Del` / `ChangeRoom` 三类高 churn benchmark，并产出 CPU / memory / mutex / block `pprof`。
+- 当前画像显示：`Put` / `Del` 的主要内存成本集中在 `NewChannel`，`ChangeRoom` 更偏锁竞争与阻塞路径。
+- 已使用指定 Go 环境执行 `go test ./connect-node/...` 与 `go test -race ./connect-node/...`，结果通过。
 - 2026-03-12: Story 2.3b 正式进入开发准备，状态更新为 `ready-for-dev`。
 
 ### File List
@@ -79,8 +91,11 @@ Amelia-context / backlog-story
 - /mnt/pubsub/connect-node/bucket.go
 - /mnt/pubsub/connect-node/room.go
 - /mnt/pubsub/connect-node/bucket_test.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/validation/story-2-3b/run-churn-benchmark.sh
 
 ## Change Log
 
 - 2026-03-12: 新增 Epic 2 backlog story，补齐高 churn 连接/房间路径的性能画像与优化验证空间。
+- 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-12: 完成 churn benchmark 与 `pprof` 基线，状态更新为 `review`。
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。

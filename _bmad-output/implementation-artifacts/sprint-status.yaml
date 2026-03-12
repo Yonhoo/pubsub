@@ -42,7 +42,7 @@ development_status:
   2-2a-steady-state-flush-benchmark: done
   2-3-broadcast-snapshot-and-unlock-push: done
   2-3a-broadcast-snapshot-allocation-optimization: done
-  2-3b-churn-path-profiling-and-optimization-validation: ready-for-dev
+  2-3b-churn-path-profiling-and-optimization-validation: review
   2-4-queue-full-failure-semantics-and-observability: backlog
   epic-2-retrospective: optional
 
