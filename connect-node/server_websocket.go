@@ -403,6 +403,8 @@ close:
 func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *proto.Proto) error {
 	switch p.Op {
 	case 1: // 加入房间
+		// Join must stay synchronous: controller result, local room/watch updates, and
+		// the response enqueue all belong to the same confirmation chain.
 		// 这里可以调用具体的业务逻辑
 
 		// 从 Body 中获取 UserName（客户端发送的 body 是 userName）
