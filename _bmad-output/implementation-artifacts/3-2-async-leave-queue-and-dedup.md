@@ -1,6 +1,6 @@
 # Story 3.2: Leave 异步队列与去重
 
-Status: review
+Status: done
 
 ## Story
 
@@ -45,6 +45,7 @@ so that 连接风暴时关闭路径不会被控制面调用拖慢。
 
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-12: Leave 改为本地解绑后异步入队，补充 `room:user` 去重和回归测试，状态更新为 `review`。
+- 2026-03-12: 执行 `/bmad-bmm-code-review`，结论 Approve，状态更新为 `done`。
 
 ## Dev Agent Record
 
@@ -75,3 +76,39 @@ Amelia-context / dev-story
 - /mnt/pubsub/connect-node/server_websocket.go
 - /mnt/pubsub/connect-node/server_websocket_test.go
 - /mnt/pubsub/_bmad-output/implementation-artifacts/3-2-async-leave-queue-and-dedup.md
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-12
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- 本地解绑已先于异步 Leave。
+  - `cleanupUser` 先执行 `bucket.Del(channel)` 与 `channel.Room = nil`
+  - 之后才调用 `EnqueueLeave(...)`
+  - 回归测试已证明控制面 Leave 被阻塞时，本地解绑仍已完成
+- `room:user` 去重语义正确，不会误吞不同任务。
+  - 去重键只由 `roomID` 与 `userID` 组成
+  - 同一 pending Leave 会被压缩
+  - 不同 room 或不同 user 的任务不会共享 key
+- Join 同步语义未被破坏。
+  - Story 3.1 的 Join 守护测试继续通过
+  - 本次改造只动关闭/清理路径，没有把 Join 迁到异步链路
+- 未发现新的并发风险。
+  - pending map 受互斥保护
+  - worker 处理完成后会清理 dedup key，避免永久卡死
+
+### Residual Risks / Testing Gaps
+
+- 当前实现对 leave queue 入队超时只做日志，不做自动重试；这与 Story 3.2 的“基础重试准备”边界一致，完整失败恢复应由 Story 3.3 接手。
+- `Stop()` 关闭 leave queue 后不额外等待 worker drain 完成；当前测试没有暴露问题，但如果后续需要更严格停机保证，可以在 Story 3.3 一并收敛。
