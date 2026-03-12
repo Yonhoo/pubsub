@@ -32,6 +32,7 @@ const (
 	writeBatchSize      = 32
 	writeBatchTimeout   = 500 * time.Millisecond
 	writeBatchQueueSize = 1024
+	queueFullLogWindow  = time.Second
 )
 
 // ProtoResponse Proto 消息的响应结构体
@@ -61,6 +62,9 @@ func (h *ProtoMessageHandler) sendProtoResponse(session getty.Session, req *prot
 	}
 
 	if err = h.writeProto(session, protoResp, "response"); err != nil {
+		if h.isSharedWriterQueueFull(err) {
+			return err
+		}
 		wsLog("❌ [ProtoHandler] 发送响应失败: %v", err)
 		return err
 	}
@@ -278,6 +282,8 @@ type ProtoMessageHandler struct {
 
 	// Batch 写入验证统计（用于确认 WriteBytesArray 合并发送是否生效）
 	batchEnqueued         uint64
+	batchEnqueueFailures  uint64
+	batchEnqueueQueueFull uint64
 	batchFlushes          uint64
 	batchFlushByCount     uint64
 	batchFlushByBytes     uint64
@@ -286,6 +292,7 @@ type ProtoMessageHandler struct {
 	batchFlushedBytes     uint64
 	batchMaxPkgsPerFlush  uint32
 	batchLastFlushLogNano int64
+	batchLastFailLogNano  int64
 
 	closeOnce sync.Once
 }
@@ -321,11 +328,7 @@ func (h *ProtoMessageHandler) OnOpen(session getty.Session) error {
 		}
 		h.channel.SetServerPushWriter(func(p *proto.Proto) error {
 			// Keep server-side push non-blocking; drop when shard queue is full.
-			if h.server == nil || h.server.sharedWriter == nil || h.writeSessionID == 0 {
-				return fmt.Errorf("shared writer unavailable")
-			}
-			atomic.AddUint64(&h.batchEnqueued, 1)
-			return h.server.sharedWriter.TryEnqueue(h.writeSessionID, p)
+			return h.enqueueSharedWrite(p, "broadcast")
 		})
 	}
 
@@ -379,7 +382,9 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 		default:
 			// 服务端推送的消息（通过 Broadcast/BroadcastRoom 推送）
 			if err := h.writeProto(session, p, "broadcast"); err != nil {
-				wsLog("❌ [ProtoHandler] 发送推送消息失败: %v", err)
+				if !h.isSharedWriterQueueFull(err) {
+					wsLog("❌ [ProtoHandler] 发送推送消息失败: %v", err)
+				}
 			} else {
 				h.markWriteTime()
 			}
@@ -645,7 +650,9 @@ func (h *ProtoMessageHandler) OnMessage(session getty.Session, pkg any) {
 			Body:   nil,
 		}
 		if err := h.writeProto(session, resp, "heartbeat"); err != nil {
-			wsLog("⚠️  [ProtoHandler] 发送心跳响应失败: %v", err)
+			if !h.isSharedWriterQueueFull(err) {
+				wsLog("⚠️  [ProtoHandler] 发送心跳响应失败: %v", err)
+			}
 		} else {
 			h.markWriteTime()
 		}
@@ -678,11 +685,62 @@ func (h *ProtoMessageHandler) OnMessage(session getty.Session, pkg any) {
 }
 
 func (h *ProtoMessageHandler) writeProto(session getty.Session, p *proto.Proto, source string) error {
+	return h.enqueueSharedWrite(p, source)
+}
+
+func (h *ProtoMessageHandler) enqueueSharedWrite(p *proto.Proto, source string) error {
 	if h.server == nil || h.server.sharedWriter == nil || h.writeSessionID == 0 {
-		return fmt.Errorf("shared writer unavailable")
+		err := fmt.Errorf("shared writer unavailable")
+		h.recordSharedWriterEnqueue(source, err)
+		return err
+	}
+	if err := h.server.sharedWriter.TryEnqueue(h.writeSessionID, p); err != nil {
+		h.recordSharedWriterEnqueue(source, err)
+		return err
 	}
 	atomic.AddUint64(&h.batchEnqueued, 1)
-	return h.server.sharedWriter.Enqueue(h.writeSessionID, p)
+	if h.server != nil && h.server.metrics != nil {
+		h.server.metrics.RecordSharedWriterEnqueue(context.Background(), source, "success", "none")
+	}
+	return nil
+}
+
+func (h *ProtoMessageHandler) recordSharedWriterEnqueue(source string, err error) {
+	atomic.AddUint64(&h.batchEnqueueFailures, 1)
+	reason := "unknown"
+	if h.isSharedWriterQueueFull(err) {
+		reason = "queue_full"
+		atomic.AddUint64(&h.batchEnqueueQueueFull, 1)
+	} else if err != nil {
+		reason = "unavailable"
+	}
+	if h.server != nil && h.server.metrics != nil {
+		h.server.metrics.RecordSharedWriterEnqueue(context.Background(), source, "failure", reason)
+	}
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&h.batchLastFailLogNano)
+	if now-last < int64(queueFullLogWindow) {
+		return
+	}
+	if !atomic.CompareAndSwapInt64(&h.batchLastFailLogNano, last, now) {
+		return
+	}
+	remote := ""
+	if h.channel != nil {
+		remote = h.channel.IP
+	}
+	wsLog("⚠️  [ProtoHandler] shared writer enqueue failed: source=%s reason=%s err=%v failures=%d queueFull=%d remote=%s",
+		source,
+		reason,
+		err,
+		atomic.LoadUint64(&h.batchEnqueueFailures),
+		atomic.LoadUint64(&h.batchEnqueueQueueFull),
+		remote,
+	)
+}
+
+func (h *ProtoMessageHandler) isSharedWriterQueueFull(err error) bool {
+	return errors.Is(err, errSharedWriterQueueFull)
 }
 
 func (h *ProtoMessageHandler) markWriteTime() {
@@ -750,6 +808,8 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 			pkgs := atomic.LoadUint64(&h.batchFlushedPkgs)
 			bytes := atomic.LoadUint64(&h.batchFlushedBytes)
 			enq := atomic.LoadUint64(&h.batchEnqueued)
+			failures := atomic.LoadUint64(&h.batchEnqueueFailures)
+			queueFull := atomic.LoadUint64(&h.batchEnqueueQueueFull)
 			maxPkgs := atomic.LoadUint32(&h.batchMaxPkgsPerFlush)
 			avgPkgs := float64(pkgs) / float64(flushes)
 			remote := ""
@@ -760,6 +820,9 @@ func (h *ProtoMessageHandler) OnCron(session getty.Session) {
 			if avgPkgs > 1.05 {
 				wsLog("[stat] ws batch: enqueued=%d flushes=%d pkgs=%d avgPkgs=%.2f bytes=%d maxPkgs=%d remote=%s",
 					enq, flushes, pkgs, avgPkgs, bytes, maxPkgs, remote)
+			}
+			if failures != 0 {
+				wsLog("[stat] ws enqueue failures: total=%d queueFull=%d remote=%s", failures, queueFull, remote)
 			}
 		}
 	}

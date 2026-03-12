@@ -40,6 +40,7 @@ type MetricsCollector struct {
 	roomUserCount   metric.Int64ObservableGauge
 	apiRequestCount metric.Int64Counter
 	apiErrorCount   metric.Int64Counter
+	sharedWriterEnqueueTotal metric.Int64Counter
 	nodeConnections metric.Int64ObservableGauge
 
 	// 用于计算当前值
@@ -111,6 +112,15 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 		metric.WithDescription("Total number of API errors"),
 		metric.WithUnit("{error}"),
 	)
+
+	mc.sharedWriterEnqueueTotal, err = meter.Int64Counter(
+		"pubsub.shared_writer.enqueue.total",
+		metric.WithDescription("Shared writer enqueue attempts by source/result/reason"),
+		metric.WithUnit("{enqueue}"),
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	return mc, nil
 }
@@ -197,6 +207,18 @@ func (m *MetricsCollector) RecordAPIRequest(ctx context.Context, method string, 
 	if !success {
 		m.apiErrorCount.Add(ctx, 1, metric.WithAttributes(attrs...))
 	}
+}
+
+func (m *MetricsCollector) RecordSharedWriterEnqueue(ctx context.Context, source, result, reason string) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("source", source),
+		attribute.String("result", result),
+		attribute.String("reason", reason),
+	}
+	m.sharedWriterEnqueueTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // ========== Getters ==========

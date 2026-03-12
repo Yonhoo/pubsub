@@ -1,6 +1,6 @@
 # Story 2.4: 队列满场景失败语义与可观测
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -43,3 +43,32 @@ so that 我可以快速判断这是容量瓶颈而不是功能故障。
 ## Change Log
 
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-12: shared writer enqueue 路径统一为显式 `queue full` 失败语义，并补齐节流日志与 metrics 计数。
+- 2026-03-12: 执行 `/bmad-bmm-dev-story`，状态更新为 `review`。
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Amelia-context / dev-story
+
+### Debug Log References
+
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.031s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.054s`
+
+### Completion Notes List
+
+- `writeProto` 与 server push enqueue 统一改为 `TryEnqueue`，shared writer 满载时返回稳定 `shared writer queue full` 错误。
+- 新增 enqueue success/failure/queue_full 计数，并接入 `pubsub.shared_writer.enqueue.total` metrics。
+- 新增 queue-full 节流日志，避免 response/broadcast/heartbeat 高压场景下错误日志爆量。
+- 广播侧保持非阻塞：`Channel.Push` 在 shared writer 满载时仍快速返回，并继续累计 drop 计数。
+
+### File List
+
+- /mnt/pubsub/connect-node/server_websocket.go
+- /mnt/pubsub/connect-node/server_websocket_test.go
+- /mnt/pubsub/pkg/metrics/metrics.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/2-4-queue-full-failure-semantics-and-observability.md

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,6 +87,62 @@ func TestWriteProtoConcurrentWithoutSharedWriterStaysOnErrorPath(t *testing.T) {
 
 	if got := atomic.LoadUint64(&h.batchEnqueued); got != 0 {
 		t.Fatalf("expected batchEnqueued to remain 0, got %d", got)
+	}
+	if got := atomic.LoadUint64(&h.batchEnqueueFailures); got != writers {
+		t.Fatalf("expected batchEnqueueFailures=%d, got %d", writers, got)
+	}
+}
+
+func TestWriteProtoQueueFullReturnsExplicitErrorAndCounts(t *testing.T) {
+	manager := newSharedWriteManager(1, 1, writeBatchMaxBytes, time.Second, 1)
+	h := &ProtoMessageHandler{
+		server:         &ConnectNodeServer{sharedWriter: manager},
+		writeSessionID: 9,
+	}
+
+	shard := manager.pickShard(h.writeSessionID)
+	shard.in <- writeEvent{kind: writeEventEnqueue, sessionID: h.writeSessionID, msg: &proto.Proto{Op: 9, Seq: 1}}
+
+	err := h.writeProto(nil, &proto.Proto{Op: 9, Seq: 2}, "response")
+	if !errors.Is(err, errSharedWriterQueueFull) {
+		t.Fatalf("expected errSharedWriterQueueFull, got %v", err)
+	}
+	if got := atomic.LoadUint64(&h.batchEnqueued); got != 0 {
+		t.Fatalf("expected batchEnqueued=0, got %d", got)
+	}
+	if got := atomic.LoadUint64(&h.batchEnqueueFailures); got != 1 {
+		t.Fatalf("expected batchEnqueueFailures=1, got %d", got)
+	}
+	if got := atomic.LoadUint64(&h.batchEnqueueQueueFull); got != 1 {
+		t.Fatalf("expected batchEnqueueQueueFull=1, got %d", got)
+	}
+}
+
+func TestServerPushWriterQueueFullStaysNonBlocking(t *testing.T) {
+	manager := newSharedWriteManager(1, 1, writeBatchMaxBytes, time.Second, 1)
+	ch := NewChannel(8, 8)
+	ch.Key = "user-1"
+	h := &ProtoMessageHandler{
+		server:         &ConnectNodeServer{sharedWriter: manager},
+		channel:        ch,
+		writeSessionID: 12,
+	}
+	ch.SetServerPushWriter(func(p *proto.Proto) error {
+		return h.enqueueSharedWrite(p, "broadcast")
+	})
+
+	shard := manager.pickShard(h.writeSessionID)
+	shard.in <- writeEvent{kind: writeEventEnqueue, sessionID: h.writeSessionID, msg: &proto.Proto{Op: 10, Seq: 1}}
+
+	err := ch.Push(&proto.Proto{Op: 10, Seq: 2})
+	if !errors.Is(err, errSharedWriterQueueFull) {
+		t.Fatalf("expected errSharedWriterQueueFull, got %v", err)
+	}
+	if got := atomic.LoadInt64(&ch.pushDropCount); got != 1 {
+		t.Fatalf("expected pushDropCount=1, got %d", got)
+	}
+	if got := atomic.LoadUint64(&h.batchEnqueueQueueFull); got != 1 {
+		t.Fatalf("expected batchEnqueueQueueFull=1, got %d", got)
 	}
 }
 
