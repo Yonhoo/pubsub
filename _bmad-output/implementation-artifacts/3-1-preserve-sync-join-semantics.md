@@ -1,6 +1,6 @@
 # Story 3.1: Join 同步语义守护
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -37,3 +37,30 @@ so that 业务侧仍可即时判定入房成功/失败。
 ## Change Log
 
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-12: 新增 Join 同步语义回归测试与代码注释，状态更新为 `review`。
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Amelia-context / dev-story
+
+### Debug Log References
+
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.032s`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
+- 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.056s`
+
+### Completion Notes List
+
+- 为 Join 路径补充“控制面未返回前不得提前 ack”的同步语义测试。
+- 为 Join 失败路径补充错误 ack 与本地 room/watch 不被污染的回归测试。
+- 在 Join 分支增加同步确认链路注释，明确后续 Leave 异步化改造不得影响 Join 的立即确认语义。
+- 本 Story 未改 Join 协议行为，只通过测试和注释锁定现有正确语义。
+
+### File List
+
+- /mnt/pubsub/connect-node/server_websocket.go
+- /mnt/pubsub/connect-node/server_websocket_test.go
+- /mnt/pubsub/_bmad-output/implementation-artifacts/3-1-preserve-sync-join-semantics.md
