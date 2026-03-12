@@ -17,7 +17,7 @@ import (
 )
 
 type stubControllerClient struct {
-	joinRoomFn func(ctx context.Context, in *controller.JoinRoomRequest, opts ...grpc.CallOption) (*controller.JoinRoomResponse, error)
+	joinRoomFn  func(ctx context.Context, in *controller.JoinRoomRequest, opts ...grpc.CallOption) (*controller.JoinRoomResponse, error)
 	leaveRoomFn func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error)
 }
 
@@ -77,12 +77,12 @@ func newLeaveTestHandler(client controller.ControllerServiceClient) *ProtoMessag
 	ch := NewChannel(8, 8)
 	ch.Key = "leave-user"
 	h := &ProtoMessageHandler{
-		server:  server,
-		channel: ch,
-		bucket:  server.buckets[0],
-		roomId:  "room-leave",
+		server:   server,
+		channel:  ch,
+		bucket:   server.buckets[0],
+		roomId:   "room-leave",
 		clientId: "user-leave",
-		auth:    true,
+		auth:     true,
 	}
 	if err := h.bucket.Put(h.roomId, h.channel); err != nil {
 		panic(err)
@@ -392,6 +392,94 @@ func TestLeaveQueueDeduplicatesRoomUserKey(t *testing.T) {
 
 	close(releaseLeave)
 	server.Stop()
+}
+
+func TestLeaveQueueRetriesAndEventuallySucceeds(t *testing.T) {
+	attempts := atomic.Int32{}
+	success := make(chan struct{}, 1)
+	server := &ConnectNodeServer{
+		controllerClient: &stubControllerClient{leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			if attempts.Add(1) < 3 {
+				return nil, errors.New("temporary leave failure")
+			}
+			success <- struct{}{}
+			return &controller.LeaveRoomResponse{}, nil
+		}},
+		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
+		leaveRetryDelay:          10 * time.Millisecond,
+		leaveMaxAttempts:         3,
+		leavePending:             make(map[string]struct{}),
+	}
+	server.initLeaveWorkers(1, 8)
+	defer server.Stop()
+
+	if err := server.EnqueueLeave("user-r", "room-r"); err != nil {
+		t.Fatalf("enqueue leave failed: %v", err)
+	}
+
+	select {
+	case <-success:
+	case <-time.After(time.Second):
+		t.Fatal("expected retry to eventually succeed")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("expected 3 attempts, got %d", got)
+	}
+	server.leavePendingMu.Lock()
+	_, exists := server.leavePending[leaveDedupKey("room-r", "user-r")]
+	server.leavePendingMu.Unlock()
+	if exists {
+		t.Fatal("expected pending key to clear after retry success")
+	}
+}
+
+func TestLeaveQueueFinalFailureClearsPendingAndAllowsReenqueue(t *testing.T) {
+	attempts := atomic.Int32{}
+	done := make(chan struct{}, 1)
+	server := &ConnectNodeServer{
+		controllerClient: &stubControllerClient{leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			if attempts.Add(1) == 2 {
+				done <- struct{}{}
+			}
+			return nil, errors.New("permanent leave failure")
+		}},
+		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
+		leaveRetryDelay:          10 * time.Millisecond,
+		leaveMaxAttempts:         2,
+		leavePending:             make(map[string]struct{}),
+	}
+	server.initLeaveWorkers(1, 8)
+	defer server.Stop()
+
+	if err := server.EnqueueLeave("user-f", "room-f"); err != nil {
+		t.Fatalf("enqueue leave failed: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expected leave retries to exhaust")
+	}
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for {
+		server.leavePendingMu.Lock()
+		_, exists := server.leavePending[leaveDedupKey("room-f", "user-f")]
+		server.leavePendingMu.Unlock()
+		if !exists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected pending key to clear after final failure")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if err := server.EnqueueLeave("user-f", "room-f"); err != nil {
+		t.Fatalf("reenqueue after final failure failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := attempts.Load(); got < 3 {
+		t.Fatalf("expected reenqueue to trigger new leave attempts, got %d", got)
+	}
 }
 
 func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {

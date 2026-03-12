@@ -34,14 +34,15 @@ type MetricsCollector struct {
 	serviceID   string
 
 	// Controller metrics
-	totalRooms      metric.Int64UpDownCounter
-	totalUsers      metric.Int64UpDownCounter
-	totalNodes      metric.Int64UpDownCounter
-	roomUserCount   metric.Int64ObservableGauge
-	apiRequestCount metric.Int64Counter
-	apiErrorCount   metric.Int64Counter
+	totalRooms               metric.Int64UpDownCounter
+	totalUsers               metric.Int64UpDownCounter
+	totalNodes               metric.Int64UpDownCounter
+	roomUserCount            metric.Int64ObservableGauge
+	apiRequestCount          metric.Int64Counter
+	apiErrorCount            metric.Int64Counter
 	sharedWriterEnqueueTotal metric.Int64Counter
-	nodeConnections metric.Int64ObservableGauge
+	leaveOutcomeTotal        metric.Int64Counter
+	nodeConnections          metric.Int64ObservableGauge
 
 	// 用于计算当前值
 	mu                 sync.RWMutex
@@ -117,6 +118,15 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 		"pubsub.shared_writer.enqueue.total",
 		metric.WithDescription("Shared writer enqueue attempts by source/result/reason"),
 		metric.WithUnit("{enqueue}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	mc.leaveOutcomeTotal, err = meter.Int64Counter(
+		"pubsub.leave.total",
+		metric.WithDescription("Leave queue outcomes by result and reason"),
+		metric.WithUnit("{leave}"),
 	)
 	if err != nil {
 		return nil, err
@@ -219,6 +229,17 @@ func (m *MetricsCollector) RecordSharedWriterEnqueue(ctx context.Context, source
 		attribute.String("reason", reason),
 	}
 	m.sharedWriterEnqueueTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (m *MetricsCollector) RecordLeaveOutcome(ctx context.Context, result, reason string) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("result", result),
+		attribute.String("reason", reason),
+	}
+	m.leaveOutcomeTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // ========== Getters ==========

@@ -69,16 +69,18 @@ type ConnectNodeServer struct {
 	roomWorkerEnqueueTimeout time.Duration
 	leaveQueue               chan *leaveTask
 	leaveWorkerNum           uint32
+	leaveRetryDelay          time.Duration
+	leaveMaxAttempts         int
 	leavePendingMu           sync.Mutex
 	leavePending             map[string]struct{}
 	stopOnce                 sync.Once
 }
 
 type leaveTask struct {
-	key       string
-	userID    string
-	roomID    string
-	attempts  int
+	key        string
+	userID     string
+	roomID     string
+	attempts   int
 	enqueuedAt time.Time
 }
 
@@ -124,6 +126,8 @@ func NewConnectNodeServer(
 		bucketIdx:                uint32(cfg.Bucket.Size),
 		round:                    NewRound(cfg),
 		roomWorkerEnqueueTimeout: roomWorkerEnqueueTimeout,
+		leaveRetryDelay:          200 * time.Millisecond,
+		leaveMaxAttempts:         3,
 		leavePending:             make(map[string]struct{}),
 		stopRoomSync:             make(chan struct{}),
 	}
@@ -220,19 +224,32 @@ func (s *ConnectNodeServer) EnqueueLeave(userID, roomID string) error {
 		return nil
 	}
 	key := leaveDedupKey(roomID, userID)
-	s.leavePendingMu.Lock()
-	if _, ok := s.leavePending[key]; ok {
-		s.leavePendingMu.Unlock()
-		return nil
-	}
-	s.leavePending[key] = struct{}{}
-	s.leavePendingMu.Unlock()
-
 	task := &leaveTask{
 		key:        key,
 		userID:     userID,
 		roomID:     roomID,
 		enqueuedAt: time.Now(),
+	}
+	return s.enqueueLeaveTask(task, true)
+}
+
+func (s *ConnectNodeServer) enqueueLeaveTask(task *leaveTask, markPending bool) error {
+	if s == nil || task == nil || task.userID == "" || task.roomID == "" {
+		return nil
+	}
+	if markPending {
+		key := task.key
+		if key == "" {
+			key = leaveDedupKey(task.roomID, task.userID)
+			task.key = key
+		}
+		s.leavePendingMu.Lock()
+		if _, ok := s.leavePending[key]; ok {
+			s.leavePendingMu.Unlock()
+			return nil
+		}
+		s.leavePending[key] = struct{}{}
+		s.leavePendingMu.Unlock()
 	}
 
 	var (
@@ -250,21 +267,27 @@ func (s *ConnectNodeServer) EnqueueLeave(userID, roomID string) error {
 	case s.leaveQueue <- task:
 		return nil
 	case <-enqueueCtx.Done():
-		s.leavePendingMu.Lock()
-		delete(s.leavePending, key)
-		s.leavePendingMu.Unlock()
+		if markPending {
+			s.leavePendingMu.Lock()
+			delete(s.leavePending, task.key)
+			s.leavePendingMu.Unlock()
+		}
 		return enqueueCtx.Err()
 	}
 }
 
 func (s *ConnectNodeServer) processLeaveTask(task *leaveTask) {
-	defer func() {
+	finish := func() {
 		s.leavePendingMu.Lock()
 		delete(s.leavePending, task.key)
 		s.leavePendingMu.Unlock()
-	}()
+	}
 	if s.controllerClient == nil {
 		wsLog("⚠️  [LeaveQueue] controller client unavailable user=%s room=%s", task.userID, task.roomID)
+		if s.metrics != nil {
+			s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", "controller_unavailable")
+		}
+		finish()
 		return
 	}
 
@@ -280,17 +303,68 @@ func (s *ConnectNodeServer) processLeaveTask(task *leaveTask) {
 	task.attempts++
 
 	if err != nil {
+		if s.leaveMaxAttempts <= 0 {
+			s.leaveMaxAttempts = 1
+		}
+		if task.attempts < s.leaveMaxAttempts {
+			if s.metrics != nil {
+				s.metrics.RecordLeaveOutcome(context.Background(), "retry_scheduled", "rpc_error")
+			}
+			wsLog("⚠️  [LeaveQueue] LeaveRoom 重试排队 user=%s room=%s attempts=%d elapsed=%v err=%v",
+				task.userID, task.roomID, task.attempts, elapsed, err)
+			s.scheduleLeaveRetry(task)
+			return
+		}
 		wsLog("❌ [LeaveQueue] LeaveRoom 失败 user=%s room=%s attempts=%d elapsed=%v err=%v",
 			task.userID, task.roomID, task.attempts, elapsed, err)
+		wsLog("🚨 [LeaveQueue] LeaveRoom 最终失败 user=%s room=%s attempts=%d err=%v",
+			task.userID, task.roomID, task.attempts, err)
+		if s.metrics != nil {
+			s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", "rpc_error")
+		}
+		finish()
 		return
 	}
 	if resp != nil {
 		wsLog("✅ [LeaveQueue] LeaveRoom 成功 user=%s room=%s attempts=%d elapsed=%v",
 			task.userID, task.roomID, task.attempts, elapsed)
+		if s.metrics != nil {
+			s.metrics.RecordLeaveOutcome(context.Background(), "success", "none")
+		}
+		finish()
 		return
 	}
 	wsLog("⚠️  [LeaveQueue] LeaveRoom 返回 nil user=%s room=%s attempts=%d elapsed=%v",
 		task.userID, task.roomID, task.attempts, elapsed)
+	if s.metrics != nil {
+		s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", "nil_response")
+	}
+	finish()
+}
+
+func (s *ConnectNodeServer) scheduleLeaveRetry(task *leaveTask) {
+	if s == nil || task == nil {
+		return
+	}
+	delay := s.leaveRetryDelay
+	if delay <= 0 {
+		delay = 200 * time.Millisecond
+	}
+	go func(t *leaveTask) {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		<-timer.C
+		if err := s.enqueueLeaveTask(t, false); err != nil {
+			wsLog("🚨 [LeaveQueue] LeaveRoom 重试入队失败 user=%s room=%s attempts=%d err=%v",
+				t.userID, t.roomID, t.attempts, err)
+			if s.metrics != nil {
+				s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", "retry_enqueue")
+			}
+			s.leavePendingMu.Lock()
+			delete(s.leavePending, t.key)
+			s.leavePendingMu.Unlock()
+		}
+	}(task)
 }
 
 func (s *ConnectNodeServer) roomBroadcastProc(ch chan *push.BroadcastRoomReq) {
