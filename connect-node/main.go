@@ -311,6 +311,16 @@ func loadConnectNodeConfig() *ConnectNodeConfig {
 	log.Printf("   - Protocol.SvrProto: %d (signal channel 缓冲区大小)", cfg.Protocol.SvrProto)
 	log.Printf("   - Protocol.CliProto: %d", cfg.Protocol.CliProto)
 	log.Printf("   - Bucket.Channel: %d", cfg.Bucket.Channel)
+	if cfg.SharedWriter != nil {
+		log.Printf("   - SharedWriter.BatchSize: %d", cfg.SharedWriter.BatchSize)
+		log.Printf("   - SharedWriter.MaxBatchBytes: %d", cfg.SharedWriter.MaxBatchBytes)
+		log.Printf("   - SharedWriter.FlushInterval: %v", cfg.SharedWriter.FlushInterval)
+		log.Printf("   - SharedWriter.QueueSize: %d", cfg.SharedWriter.QueueSize)
+	}
+	if cfg.LeaveQueue != nil {
+		log.Printf("   - LeaveQueue.RetryDelay: %v", cfg.LeaveQueue.RetryDelay)
+		log.Printf("   - LeaveQueue.MaxAttempts: %d", cfg.LeaveQueue.MaxAttempts)
+	}
 
 	// 构建节点地址（gRPC 地址，供其他服务调用）
 	// 本地开发使用 localhost，生产环境可以从环境变量获取

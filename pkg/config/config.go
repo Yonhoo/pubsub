@@ -28,16 +28,18 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Server      *ServerConfig
-	Database    *DatabaseConfig
-	Redis       *RedisConfig
-	ETCD        *ETCDConfig
-	Room        *RoomConfig
-	Bucket      *BucketConfig
-	TCPConfig   *TcpConfig
-	Protocol    *Protocol
-	RpcConfig   *RpcConfig
-	GettyConfig *GettyConfig
+	Server       *ServerConfig
+	Database     *DatabaseConfig
+	Redis        *RedisConfig
+	ETCD         *ETCDConfig
+	Room         *RoomConfig
+	Bucket       *BucketConfig
+	TCPConfig    *TcpConfig
+	Protocol     *Protocol
+	SharedWriter *SharedWriterConfig
+	LeaveQueue   *LeaveQueueConfig
+	RpcConfig    *RpcConfig
+	GettyConfig  *GettyConfig
 }
 
 type GettySessionParam struct {
@@ -96,6 +98,18 @@ type Protocol struct {
 	SvrProto         int
 	CliProto         int
 	HandshakeTimeout time.Duration
+}
+
+type SharedWriterConfig struct {
+	BatchSize     int
+	MaxBatchBytes int
+	FlushInterval time.Duration
+	QueueSize     int
+}
+
+type LeaveQueueConfig struct {
+	RetryDelay  time.Duration
+	MaxAttempts int
 }
 
 type TcpConfig struct {
@@ -220,6 +234,16 @@ func LoadConfigFromFile(filename string) *Config {
 			CliProto:         getEnvOrYAMLInt(yamlCfg, "PROTOCOL_CLI_PROTO", "protocol.cli_proto", 5),
 			HandshakeTimeout: getEnvOrYAMLDuration(yamlCfg, "PROTOCOL_HANDSHAKE_TIMEOUT_SECONDS", "protocol.handshake_timeout", 5*time.Second),
 		},
+		SharedWriter: &SharedWriterConfig{
+			BatchSize:     getEnvOrYAMLInt(yamlCfg, "SHARED_WRITER_BATCH_SIZE", "shared_writer.batch_size", 32),
+			MaxBatchBytes: getEnvOrYAMLInt(yamlCfg, "SHARED_WRITER_MAX_BATCH_BYTES", "shared_writer.max_batch_bytes", 64*1024),
+			FlushInterval: getEnvOrYAMLDuration(yamlCfg, "SHARED_WRITER_FLUSH_INTERVAL", "shared_writer.flush_interval", 500*time.Millisecond),
+			QueueSize:     getEnvOrYAMLInt(yamlCfg, "SHARED_WRITER_QUEUE_SIZE", "shared_writer.queue_size", 1024),
+		},
+		LeaveQueue: &LeaveQueueConfig{
+			RetryDelay:  getEnvOrYAMLDuration(yamlCfg, "LEAVE_QUEUE_RETRY_DELAY", "leave_queue.retry_delay", 200*time.Millisecond),
+			MaxAttempts: getEnvOrYAMLInt(yamlCfg, "LEAVE_QUEUE_MAX_ATTEMPTS", "leave_queue.max_attempts", 3),
+		},
 		GettyConfig: &GettyConfig{
 			AppName:         getEnvOrYAMLStr(yamlCfg, "GETTY_APP_NAME", "getty.app_name", "pubsub-server"),
 			Host:            getEnvOrYAMLStr(yamlCfg, "GETTY_HOST", "getty.host", "0.0.0.0"),
@@ -298,11 +322,14 @@ func getYAMLValue(config RawYAMLConfig, path string) interface{} {
 	var current interface{} = config
 
 	for _, part := range parts {
-		m, ok := current.(map[string]interface{})
-		if !ok {
+		switch m := current.(type) {
+		case map[string]interface{}:
+			current = m[part]
+		case RawYAMLConfig:
+			current = m[part]
+		default:
 			return nil
 		}
-		current = m[part]
 		if current == nil {
 			return nil
 		}

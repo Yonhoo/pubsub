@@ -49,6 +49,16 @@ protocol:
   cli_proto: 5      # 客户端请求队列大小
   handshake_timeout: 5s
 
+shared_writer:
+  batch_size: 32
+  max_batch_bytes: 65536
+  flush_interval: 500ms
+  queue_size: 1024
+
+leave_queue:
+  retry_delay: 200ms
+  max_attempts: 3
+
 # Getty WebSocket 配置
 getty:
   app_name: ${GETTY_APP_NAME:pubsub-connect-node}
@@ -83,5 +93,4 @@ getty:
     wait_timeout: 5m
     max_msg_len: 1024000
     session_name: pubsub-connect-session
-
 

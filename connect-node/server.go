@@ -132,12 +132,31 @@ func NewConnectNodeServer(
 		stopRoomSync:             make(chan struct{}),
 	}
 
+	sharedWriterCfg := cfg.SharedWriter
+	if sharedWriterCfg == nil {
+		sharedWriterCfg = &config.SharedWriterConfig{
+			BatchSize:     32,
+			MaxBatchBytes: 64 * 1024,
+			FlushInterval: 500 * time.Millisecond,
+			QueueSize:     1024,
+		}
+	}
+	leaveQueueCfg := cfg.LeaveQueue
+	if leaveQueueCfg == nil {
+		leaveQueueCfg = &config.LeaveQueueConfig{
+			RetryDelay:  200 * time.Millisecond,
+			MaxAttempts: 3,
+		}
+	}
+	server.leaveRetryDelay = leaveQueueCfg.RetryDelay
+	server.leaveMaxAttempts = leaveQueueCfg.MaxAttempts
+
 	server.sharedWriter = newSharedWriteManager(
 		0,
-		writeBatchSize,
-		writeBatchMaxBytes,
-		writeBatchTimeout,
-		writeBatchQueueSize,
+		sharedWriterCfg.BatchSize,
+		sharedWriterCfg.MaxBatchBytes,
+		sharedWriterCfg.FlushInterval,
+		sharedWriterCfg.QueueSize,
 	)
 	server.sharedWriter.Start()
 
