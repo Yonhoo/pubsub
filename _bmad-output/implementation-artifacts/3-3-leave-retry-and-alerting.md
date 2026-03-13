@@ -1,6 +1,6 @@
 # Story 3.3: Leave 失败重试与告警
 
-Status: review
+Status: done
 
 ## Story
 
@@ -44,6 +44,7 @@ so that 控制面一致性问题可恢复且可观测。
 
 - 2026-03-12: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-12: 在 leave queue 上补有限重试、leave outcome metrics 与最终失败告警日志，状态更新为 `review`。
+- 2026-03-13: 执行 `/bmad-bmm-code-review`，结论 Approve，状态更新为 `done`。
 
 ## Dev Agent Record
 
@@ -72,3 +73,38 @@ Amelia-context / dev-story
 - /mnt/pubsub/connect-node/server_websocket_test.go
 - /mnt/pubsub/pkg/metrics/metrics.go
 - /mnt/pubsub/_bmad-output/implementation-artifacts/3-3-leave-retry-and-alerting.md
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-13
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- Leave 重试边界清晰，不会无限重试。
+  - `leaveMaxAttempts` 明确限制最大尝试次数
+  - 失败时只会进入有限次 `retry_scheduled`
+  - 达到上限后转为 `final_failure`，不会继续循环
+- 最终失败后 dedup key 会正确释放。
+  - 成功路径调用 `finish()`
+  - 最终失败路径调用 `finish()`
+  - retry 重新入队失败时也会显式删除 pending key
+- 告警日志与 metrics 口径合理。
+  - metrics 使用 `result/reason` 二元标签，覆盖 `success` / `retry_scheduled` / `final_failure`
+  - 最终失败使用 `🚨 [LeaveQueue]` 告警日志，足以作为值班信号
+- 未发现破坏 3.2 语义的回归。
+  - 本地解绑仍先于异步 Leave
+  - Join 路径没有被卷入重试逻辑
+
+### Residual Risks / Testing Gaps
+
+- `leaveMaxAttempts <= 0` 的兜底逻辑当前在 worker 中做了共享字段回写；默认配置下不会触发，且不构成当前 Story 阻塞，但后续可收紧为局部变量读取，避免误配置场景下的无谓共享写。
