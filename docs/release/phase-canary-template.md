@@ -5,7 +5,7 @@
 ## 使用步骤
 
 1. 复制 `phase-canary-template.yaml` 为具体阶段文件（例如 `phase-2-canary.yaml`）。
-2. 按阶段填写 `phase`、`owner`、`service`、`version`、`traffic_steps`、`rollback`。
+2. 按阶段填写 `phase`、`owner`、`version`、`traffic_steps`、`rollback`。
 3. 执行校验：
 
 ```bash
@@ -19,8 +19,8 @@ go run ./tools/release/validate_phase_canary --file docs/release/phase-2-canary.
 - `traffic_steps`: 必填，至少 1 步。
 - `traffic_steps[].traffic_percent`: 必填，范围 `1..100`，并且必须单调不下降。
 - `traffic_steps[].observe_seconds`: 必填，必须大于 0。
-- `traffic_steps[].success_criteria`: 必填，至少 1 条非空、非纯空白规则。
-- `traffic_steps[].abort_criteria`: 必填，至少 1 条非空、非纯空白规则。
+- `traffic_steps[].success_criteria`: 必填，至少 1 条。
+- `traffic_steps[].abort_criteria`: 必填，至少 1 条。
 - `rollback.trigger/switch/action/verify`: 全部必填。
 - `traffic_steps` 最后一阶段必须是 `100%`，确保有完整放量定义。
 
