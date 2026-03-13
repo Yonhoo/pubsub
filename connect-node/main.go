@@ -80,6 +80,9 @@ func main() {
 
 	// 初始化 Metrics
 	metricsCollector, err := metrics.NewMetricsCollector(cfg.nodeID, "connect-node")
+	if err != nil {
+		log.Fatalf("❌ Metrics 初始化失败: %v\n", err)
+	}
 	setCriticalMetricsCollector(metricsCollector)
 	log.Printf("✅ Metrics 初始化成功\n")
 
