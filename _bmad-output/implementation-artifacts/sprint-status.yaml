@@ -58,8 +58,8 @@ development_status:
   4-3-unified-critical-metrics-export: done
   epic-4-retrospective: optional
 
-  epic-5: backlog
-  5-1-phase-canary-template: backlog
+  epic-5: in-progress
+  5-1-phase-canary-template: review
   5-2-rollback-criteria-and-runbook: backlog
   5-3-phase-gate-and-acceptance-record: backlog
   5-4-adr-drift-detection-and-writeback: backlog
