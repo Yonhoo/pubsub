@@ -1,6 +1,6 @@
 # Story 4.3: Unified Critical Metrics Export
 
-Status: in-progress
+Status: review
 
 ## Story
 
@@ -46,6 +46,7 @@ so that drop、enqueue-fail、lock-block、close-latency 可以被同一套观�
   - `bucket.go` 将 `lock_block` 指标记录移到 unlock 之后，避免延长临界区；
   - close 指标改为 `pubsub.critical.close_cleanup.duration` 并补充注释，明确仅表示本地 close 清理时延（非端到端 Leave 完成）；
   - 新增 metrics 名称与 label 集稳定性测试。
+- 2026-03-13: 在用户级 Go 环境下补跑验证通过，Story 状态恢复为 `review`。
 
 ## Dev Agent Record
 
@@ -60,6 +61,9 @@ Amelia-context / dev-story
 - 2026-03-13（review fix）: 当前执行环境缺少 `go` 工具链，无法在本地重新执行：
   - `go test ./pkg/metrics ./connect-node/...` -> `/bin/bash: go: command not found`
   - `go test -race ./pkg/metrics ./connect-node/...` -> `/bin/bash: go: command not found`
+- 2026-03-13（用户级 Go 环境）:
+  - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=/home/node/.local/go/bin:/home/node/go/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games go test ./pkg/metrics ./connect-node/...` -> passed
+  - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=/home/node/.local/go/bin:/home/node/go/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games go test -race ./pkg/metrics ./connect-node/...` -> passed
 
 ### Completion Notes
 - 统一新增 `pubsub.critical.drop.total`、`pubsub.critical.enqueue_fail.total`、`pubsub.critical.lock_block.duration`、`pubsub.critical.close_latency.duration`。
@@ -71,6 +75,7 @@ Amelia-context / dev-story
   - bucket 临界区不会被指标上报路径延长；
   - close 指标语义已明确为本地清理时延，避免被误解为端到端 Leave 完成；
   - 增加指标名与 label 集稳定性断言测试。
+- 两组要求的回归测试与 race 测试已在用户级 Go 环境下通过，满足 Story 当前验收条件，可回到 `review`。
 
 ### File List
 - `/mnt/pubsub/pkg/metrics/metrics.go`
