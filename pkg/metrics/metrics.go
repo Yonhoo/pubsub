@@ -46,7 +46,7 @@ type MetricsCollector struct {
 	criticalDropTotal            metric.Int64Counter
 	criticalEnqueueFailTotal     metric.Int64Counter
 	criticalLockBlockDuration    metric.Float64Histogram
-	criticalCloseLatencyDuration metric.Float64Histogram
+	criticalCloseCleanupDuration metric.Float64Histogram
 	nodeConnections              metric.Int64ObservableGauge
 
 	// 用于计算当前值
@@ -56,6 +56,41 @@ type MetricsCollector struct {
 	currentNodes       int64
 	roomUsers          map[string]int64
 	nodeConnectionsMap map[string]int64
+}
+
+type MetricSpec struct {
+	Name      string
+	LabelKeys []string
+}
+
+const (
+	MetricNameSharedWriterEnqueueTotal = "pubsub.shared_writer.enqueue.total"
+	MetricNameLeaveTotal               = "pubsub.leave.total"
+	MetricNameCriticalDropTotal        = "pubsub.critical.drop.total"
+	MetricNameCriticalEnqueueFailTotal = "pubsub.critical.enqueue_fail.total"
+	MetricNameCriticalLockBlockDur     = "pubsub.critical.lock_block.duration"
+	MetricNameCriticalCloseCleanupDur  = "pubsub.critical.close_cleanup.duration"
+)
+
+var criticalMetricSpecs = []MetricSpec{
+	{Name: MetricNameSharedWriterEnqueueTotal, LabelKeys: []string{"source", "result", "reason"}},
+	{Name: MetricNameLeaveTotal, LabelKeys: []string{"result", "reason"}},
+	{Name: MetricNameCriticalDropTotal, LabelKeys: []string{"kind", "reason"}},
+	{Name: MetricNameCriticalEnqueueFailTotal, LabelKeys: []string{"source", "reason"}},
+	{Name: MetricNameCriticalLockBlockDur, LabelKeys: []string{"scope", "op"}},
+	{Name: MetricNameCriticalCloseCleanupDur, LabelKeys: []string{"path", "result"}},
+}
+
+func CriticalMetricSpecs() []MetricSpec {
+	out := make([]MetricSpec, 0, len(criticalMetricSpecs))
+	for _, spec := range criticalMetricSpecs {
+		cp := MetricSpec{
+			Name:      spec.Name,
+			LabelKeys: append([]string(nil), spec.LabelKeys...),
+		}
+		out = append(out, cp)
+	}
+	return out
 }
 
 // NewMetricsCollector 创建指标收集器
@@ -120,7 +155,7 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 	)
 
 	mc.sharedWriterEnqueueTotal, err = meter.Int64Counter(
-		"pubsub.shared_writer.enqueue.total",
+		MetricNameSharedWriterEnqueueTotal,
 		metric.WithDescription("Shared writer enqueue attempts by source/result/reason"),
 		metric.WithUnit("{enqueue}"),
 	)
@@ -129,7 +164,7 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 	}
 
 	mc.leaveOutcomeTotal, err = meter.Int64Counter(
-		"pubsub.leave.total",
+		MetricNameLeaveTotal,
 		metric.WithDescription("Leave queue outcomes by result and reason"),
 		metric.WithUnit("{leave}"),
 	)
@@ -138,7 +173,7 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 	}
 
 	mc.criticalDropTotal, err = meter.Int64Counter(
-		"pubsub.critical.drop.total",
+		MetricNameCriticalDropTotal,
 		metric.WithDescription("Critical drop events by kind and reason"),
 		metric.WithUnit("{drop}"),
 	)
@@ -147,7 +182,7 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 	}
 
 	mc.criticalEnqueueFailTotal, err = meter.Int64Counter(
-		"pubsub.critical.enqueue_fail.total",
+		MetricNameCriticalEnqueueFailTotal,
 		metric.WithDescription("Critical enqueue failures by source and reason"),
 		metric.WithUnit("{failure}"),
 	)
@@ -156,7 +191,7 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 	}
 
 	mc.criticalLockBlockDuration, err = meter.Float64Histogram(
-		"pubsub.critical.lock_block.duration",
+		MetricNameCriticalLockBlockDur,
 		metric.WithDescription("Lock wait duration for critical operations"),
 		metric.WithUnit("ms"),
 	)
@@ -164,9 +199,9 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 		return nil, err
 	}
 
-	mc.criticalCloseLatencyDuration, err = meter.Float64Histogram(
-		"pubsub.critical.close_latency.duration",
-		metric.WithDescription("Close path latency for critical operations"),
+	mc.criticalCloseCleanupDuration, err = meter.Float64Histogram(
+		MetricNameCriticalCloseCleanupDur,
+		metric.WithDescription("Local session close cleanup latency (includes local detach and leave enqueue only; not end-to-end leave completion)"),
 		metric.WithUnit("ms"),
 	)
 	if err != nil {
@@ -324,7 +359,7 @@ func (m *MetricsCollector) RecordCriticalCloseLatency(ctx context.Context, path,
 		attribute.String("path", path),
 		attribute.String("result", result),
 	}
-	m.criticalCloseLatencyDuration.Record(ctx, float64(duration.Microseconds())/1000.0, metric.WithAttributes(attrs...))
+	m.criticalCloseCleanupDuration.Record(ctx, float64(duration.Microseconds())/1000.0, metric.WithAttributes(attrs...))
 }
 
 // ========== Getters ==========

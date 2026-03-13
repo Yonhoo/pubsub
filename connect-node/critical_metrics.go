@@ -45,6 +45,8 @@ func recordCriticalLockBlock(scope, op string, duration time.Duration) {
 
 func recordCriticalCloseLatency(path, result string, duration time.Duration) {
 	if mc := getCriticalMetricsCollector(); mc != nil {
+		// NOTE: this records local close-path cleanup latency only.
+		// It does not represent end-to-end LeaveRoom completion latency.
 		mc.RecordCriticalCloseLatency(context.Background(), path, result, duration)
 	}
 }

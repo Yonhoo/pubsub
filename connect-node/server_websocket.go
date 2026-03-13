@@ -557,6 +557,8 @@ func (h *ProtoMessageHandler) cleanupUser() {
 	start := time.Now()
 	result := "success"
 	defer func() {
+		// This measures local session close cleanup latency (detach + leave enqueue),
+		// not end-to-end LeaveRoom completion across the async worker path.
 		recordCriticalCloseLatency("cleanup_user", result, time.Since(start))
 	}()
 	h.rwlock.RLock()
