@@ -1,0 +1,46 @@
+# Phase canary strategy template
+# Copy this file per phase (e.g. phase-1-canary.yaml), fill placeholders,
+# then validate with:
+# go run ./tools/release/validate_phase_canary --file <your-file>
+
+phase: "phase-1-broadcast-snapshot"
+owner: "oncall-platform"
+service: "connect-node"
+version: "<image-tag-or-commit-sha>"
+
+traffic_steps:
+  - name: "canary-10"
+    traffic_percent: 10
+    observe_seconds: 900
+    success_criteria:
+      - "pubsub_critical_enqueue_fail_total{service=\"connect-node\"} increase <= 0"
+      - "p95_broadcast_latency_ms <= baseline_p95 * 1.05"
+    abort_criteria:
+      - "pubsub_critical_drop_total increase > 0"
+      - "p95_broadcast_latency_ms > baseline_p95 * 1.25"
+
+  - name: "canary-30"
+    traffic_percent: 30
+    observe_seconds: 1200
+    success_criteria:
+      - "pubsub_critical_enqueue_fail_total increase <= 0"
+      - "p95_broadcast_latency_ms <= baseline_p95 * 1.10"
+    abort_criteria:
+      - "pubsub_critical_drop_total increase > 0"
+      - "p95_broadcast_latency_ms > baseline_p95 * 1.30"
+
+  - name: "full-traffic"
+    traffic_percent: 100
+    observe_seconds: 1800
+    success_criteria:
+      - "pubsub_critical_enqueue_fail_total increase <= 0"
+      - "p95_broadcast_latency_ms <= baseline_p95 * 1.10"
+    abort_criteria:
+      - "pubsub_critical_drop_total increase > 0"
+      - "p95_broadcast_latency_ms > baseline_p95 * 1.30"
+
+rollback:
+  trigger: "any abort_criteria matched OR SLO burn-rate alert fired"
+  switch: "rollback release label to previous stable version within 5 minutes"
+  action: "redeploy last known stable image and stop canary ramp"
+  verify: "traffic returns to stable version and critical metrics recover to baseline window"
