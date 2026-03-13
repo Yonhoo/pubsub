@@ -141,3 +141,125 @@ rollback:
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestParsePhaseCanaryPlan_RejectsAdditionalDocument(t *testing.T) {
+	content := []byte(`
+phase: "phase-1"
+owner: "oncall"
+service: "connect-node"
+version: "v1"
+traffic_steps:
+  - name: "100%"
+    traffic_percent: 100
+    observe_seconds: 300
+    success_criteria:
+      - "ok"
+    abort_criteria:
+      - "bad"
+rollback:
+  trigger: "abort"
+  switch: "switch back"
+  action: "rollback"
+  verify: "recovered"
+---
+ignored: true
+`)
+
+	_, err := ParsePhaseCanaryPlan(content)
+	if err == nil {
+		t.Fatalf("expected error but got nil")
+	}
+	if !strings.Contains(err.Error(), "unexpected additional YAML document") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParsePhaseCanaryPlan_RejectsBlankCriteria(t *testing.T) {
+	content := []byte(`
+phase: "phase-1"
+owner: "oncall"
+service: "connect-node"
+version: "v1"
+traffic_steps:
+  - name: "100%"
+    traffic_percent: 100
+    observe_seconds: 300
+    success_criteria:
+      - "   "
+    abort_criteria:
+      - ""
+rollback:
+  trigger: "abort"
+  switch: "switch back"
+  action: "rollback"
+  verify: "recovered"
+`)
+
+	_, err := ParsePhaseCanaryPlan(content)
+	if err == nil {
+		t.Fatalf("expected error but got nil")
+	}
+	if !strings.Contains(err.Error(), "success_criteria must contain at least one rule") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParsePhaseCanaryPlan_RejectsUnknownField(t *testing.T) {
+	content := []byte(`
+phase: "phase-1"
+owner: "oncall"
+service: "connect-node"
+version: "v1"
+unexpected_field: true
+traffic_steps:
+  - name: "100%"
+    traffic_percent: 100
+    observe_seconds: 300
+    success_criteria:
+      - "ok"
+    abort_criteria:
+      - "bad"
+rollback:
+  trigger: "abort"
+  switch: "switch back"
+  action: "rollback"
+  verify: "recovered"
+`)
+
+	_, err := ParsePhaseCanaryPlan(content)
+	if err == nil {
+		t.Fatalf("expected error but got nil")
+	}
+	if !strings.Contains(err.Error(), "field unexpected_field not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParsePhaseCanaryPlan_MissingRequiredTopLevelField(t *testing.T) {
+	content := []byte(`
+phase: "phase-1"
+owner: "oncall"
+version: "v1"
+traffic_steps:
+  - name: "100%"
+    traffic_percent: 100
+    observe_seconds: 300
+    success_criteria:
+      - "ok"
+    abort_criteria:
+      - "bad"
+rollback:
+  trigger: "abort"
+  switch: "switch back"
+  action: "rollback"
+  verify: "recovered"
+`)
+
+	_, err := ParsePhaseCanaryPlan(content)
+	if err == nil {
+		t.Fatalf("expected error but got nil")
+	}
+	if !strings.Contains(err.Error(), "service is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
