@@ -52,10 +52,10 @@ development_status:
   3-3-leave-retry-and-alerting: done
   epic-3-retrospective: optional
 
-  epic-4: in-progress
+  epic-4: done
   4-1-dual-channel-config-for-capacity-params: done
   4-2-profiling-toggle-strategy: done
-  4-3-unified-critical-metrics-export: review
+  4-3-unified-critical-metrics-export: done
   epic-4-retrospective: optional
 
   epic-5: backlog
