@@ -2,10 +2,7 @@ package release
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
-	"io"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,12 +37,6 @@ func ParsePhaseCanaryPlan(content []byte) (PhaseCanaryPlan, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&plan); err != nil {
-		return PhaseCanaryPlan{}, fmt.Errorf("decode canary template: %w", err)
-	}
-	var trailing yaml.Node
-	if err := decoder.Decode(&trailing); err == nil {
-		return PhaseCanaryPlan{}, fmt.Errorf("decode canary template: unexpected additional YAML document")
-	} else if !errors.Is(err, io.EOF) {
 		return PhaseCanaryPlan{}, fmt.Errorf("decode canary template: %w", err)
 	}
 	if err := plan.Validate(); err != nil {
@@ -86,10 +77,10 @@ func (p PhaseCanaryPlan) Validate() error {
 		if step.ObserveSeconds <= 0 {
 			return fmt.Errorf("traffic_steps[%d].observe_seconds must be > 0", stepIndex)
 		}
-		if !hasNonEmptyRules(step.SuccessCriteria) {
+		if len(step.SuccessCriteria) == 0 {
 			return fmt.Errorf("traffic_steps[%d].success_criteria must contain at least one rule", stepIndex)
 		}
-		if !hasNonEmptyRules(step.AbortCriteria) {
+		if len(step.AbortCriteria) == 0 {
 			return fmt.Errorf("traffic_steps[%d].abort_criteria must contain at least one rule", stepIndex)
 		}
 		lastPercent = step.TrafficPercent
@@ -111,16 +102,4 @@ func (p PhaseCanaryPlan) Validate() error {
 		return fmt.Errorf("rollback.verify is required")
 	}
 	return nil
-}
-
-func hasNonEmptyRules(rules []string) bool {
-	if len(rules) == 0 {
-		return false
-	}
-	for _, rule := range rules {
-		if strings.TrimSpace(rule) != "" {
-			return true
-		}
-	}
-	return false
 }
