@@ -40,6 +40,8 @@ so that 发布风险可控且执行一致。
 - 2026-03-13: 执行 `/bmad-bmm-create-story`，新增 Story 5.1 artifact，状态设为 `ready-for-dev`。
 - 2026-03-13: 执行 `/bmad-bmm-dev-story`，新增阶段灰度 YAML 模板、模板说明文档、模板校验 CLI 与单元测试。
 - 2026-03-13: 开发与验证通过，Story 状态更新为 `review`。
+- 2026-03-13: 修复 code review findings：拒绝多 document YAML、拒绝空白 criteria 条目、对齐 docs 必填字段，并补回归测试。
+- 2026-03-13: review fix 验证通过，Story 保持 `review`。
 
 ## Dev Agent Record
 
@@ -49,12 +51,18 @@ Amelia-context / dev-story
 ### Debug Log References
 - `go test ./pkg/release ./tools/release/validate_phase_canary` -> passed
 - `go run ./tools/release/validate_phase_canary --file docs/release/phase-canary-template.yaml` -> passed
+- `go test ./pkg/release ./tools/release/validate_phase_canary`（review fix） -> passed
 
 ### Completion Notes
 - 新增可复用模板 `docs/release/phase-canary-template.yaml`，覆盖流量比例、观测窗口、成功/异常判定与回退字段。
 - 新增 `docs/release/phase-canary-template.md`，统一模板使用步骤与字段约束，确保各 Phase 执行口径一致。
 - 新增 `pkg/release` 模板解析与校验逻辑，强约束关键字段完整性、流量比例单调递增及最终 100% 放量。
 - 提供 `go run ./tools/release/validate_phase_canary --file ...` 可执行校验入口，避免缺字段模板进入发布流程。
+- review fix 后：
+  - 解析器会在首个 document 后继续解码到 EOF，拒绝尾随第二个 YAML document；
+  - `success_criteria` / `abort_criteria` 现在要求至少一条非空、非纯空白规则；
+  - 文档已补齐 `service` 必填说明；
+  - 已补多 document、空白规则、未知字段、顶层必填字段缺失的回归测试。
 
 ### File List
 - `/mnt/pubsub/_bmad-output/implementation-artifacts/5-1-phase-canary-template.md`
