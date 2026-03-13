@@ -1,6 +1,6 @@
 # Story 4.1: 容量参数双通道配置
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -40,3 +40,43 @@ so that 我可以按环境快速调优而不改代码。
 ## Change Log
 
 - 2026-03-13: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
+- 2026-03-13: shared writer / leave queue 容量参数收敛到 YAML + ENV 双入口，并补充配置测试，状态更新为 `review`。
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Amelia-context / dev-story
+
+### Debug Log References
+
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./pkg/config ./connect-node/...`
+- 结果：
+  - `ok github.com/livekit/psrpc/examples/pubsub/pkg/config 0.005s`
+  - `ok github.com/livekit/psrpc/examples/pubsub/connect-node (cached)`
+- `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./pkg/config ./connect-node/...`
+- 结果：
+  - `ok github.com/livekit/psrpc/examples/pubsub/pkg/config 1.020s`
+  - `ok github.com/livekit/psrpc/examples/pubsub/connect-node (cached)`
+
+### Completion Notes List
+
+- 新增 `SharedWriterConfig` 与 `LeaveQueueConfig`，让 shared writer / leave queue 容量参数走统一配置模型。
+- 支持 YAML 默认值 + ENV 覆盖：
+  - `SHARED_WRITER_BATCH_SIZE`
+  - `SHARED_WRITER_MAX_BATCH_BYTES`
+  - `SHARED_WRITER_FLUSH_INTERVAL`
+  - `SHARED_WRITER_QUEUE_SIZE`
+  - `LEAVE_QUEUE_RETRY_DELAY`
+  - `LEAVE_QUEUE_MAX_ATTEMPTS`
+- `server.go` 和 `main.go` 改为消费 `cfg.SharedWriter` / `cfg.LeaveQueue`，并在启动日志输出 effective values。
+- 修复 `RawYAMLConfig` 嵌套路径读取，确保新增 YAML 节点能被正确解析。
+
+### File List
+
+- /mnt/pubsub/pkg/config/config.go
+- /mnt/pubsub/pkg/config/config_test.go
+- /mnt/pubsub/connect-node/server.go
+- /mnt/pubsub/connect-node/main.go
+- /mnt/pubsub/connect-node/config.yaml
+- /mnt/pubsub/_bmad-output/implementation-artifacts/4-1-dual-channel-config-for-capacity-params.md
