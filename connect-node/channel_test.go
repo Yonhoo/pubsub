@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	gettypkg "github.com/livekit/psrpc/examples/pubsub/pkg/getty"
 	proto "github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 )
@@ -282,4 +285,23 @@ func BenchmarkCloseAlreadyClosed(b *testing.B) {
 			ch.Signal()
 		}
 	})
+}
+
+func TestSharedWriterDropReasonClassification(t *testing.T) {
+	if got := sharedWriterDropReason(nil); got != "unknown" {
+		t.Fatalf("expected unknown for nil, got %q", got)
+	}
+	if got := sharedWriterDropReason(pkg.ErrSignalFullMsgDropped); got != "signal_full" {
+		t.Fatalf("expected signal_full, got %q", got)
+	}
+	if got := sharedWriterDropReason(errSharedWriterQueueFull); got != "queue_full" {
+		t.Fatalf("expected queue_full for direct queue-full error, got %q", got)
+	}
+	wrapped := fmt.Errorf("enqueue failed: %w", errSharedWriterQueueFull)
+	if got := sharedWriterDropReason(wrapped); got != "queue_full" {
+		t.Fatalf("expected queue_full for wrapped queue-full error, got %q", got)
+	}
+	if got := sharedWriterDropReason(errors.New("other")); got != "enqueue_failed" {
+		t.Fatalf("expected enqueue_failed for generic error, got %q", got)
+	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	proto "github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
@@ -258,7 +259,7 @@ func sharedWriterDropReason(err error) string {
 	if err == pkg.ErrSignalFullMsgDropped {
 		return "signal_full"
 	}
-	if err.Error() == "shared writer queue full" {
+	if errors.Is(err, errSharedWriterQueueFull) {
 		return "queue_full"
 	}
 	return "enqueue_failed"
