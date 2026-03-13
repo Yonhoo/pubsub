@@ -1,6 +1,6 @@
 # Story 4.1: 容量参数双通道配置
 
-Status: review
+Status: done
 
 ## Story
 
@@ -41,6 +41,7 @@ so that 我可以按环境快速调优而不改代码。
 
 - 2026-03-13: 执行 `/bmad-bmm-create-story`，状态更新为 `ready-for-dev`。
 - 2026-03-13: shared writer / leave queue 容量参数收敛到 YAML + ENV 双入口，并补充配置测试，状态更新为 `review`。
+- 2026-03-13: 执行 `/bmad-bmm-code-review`，结论 Approve，状态更新为 `done`。
 
 ## Dev Agent Record
 
@@ -80,3 +81,39 @@ Amelia-context / dev-story
 - /mnt/pubsub/connect-node/main.go
 - /mnt/pubsub/connect-node/config.yaml
 - /mnt/pubsub/_bmad-output/implementation-artifacts/4-1-dual-channel-config-for-capacity-params.md
+
+## Senior Developer Review (AI)
+
+### Review Outcome
+
+Approve
+
+### Review Date
+
+2026-03-13
+
+### Findings (Severity Ordered)
+
+- 无 High/Medium/Low 级缺陷。
+
+### Review Notes
+
+- YAML + ENV 双入口优先级正确。
+  - `LoadConfigFromFile` 继续保持“ENV 优先于 YAML，YAML 优先于默认值”的口径
+  - 新增测试已经覆盖 shared writer / leave queue 的 YAML 生效与 ENV 覆盖
+- 新增 `shared_writer` / `leave_queue` 节点能够正确解析并传递到运行时。
+  - `RawYAMLConfig` 嵌套路径读取问题已修复
+  - `server.go` 读取 `cfg.SharedWriter` / `cfg.LeaveQueue`
+  - `main.go` 输出对应 effective values
+- 默认值与启动日志口径一致。
+  - 配置默认值集中在 `pkg/config`
+  - server 侧只在配置缺失时做同口径兜底
+  - 启动日志直接打印运行时实际使用值
+- 未发现新的配置回归。
+  - 现有 `Protocol/Bucket` 路径未受影响
+  - 新增配置仅扩展而未替换既有参数入口
+
+### Residual Risks / Testing Gaps
+
+- 本 Story 聚焦 shared writer / leave queue 容量参数，没有把 gRPC buffer 等其他“类容量”常量一并参数化；这不影响 4.1 通过，但如果后续要继续消除散落常量，可在 Epic 4 后续 story 中补齐。
+- 提交顺序上曾出现一次 git 锁竞争，导致 docs commit 先于代码 commit；当前仓库内容已对齐，不构成运行时风险。
