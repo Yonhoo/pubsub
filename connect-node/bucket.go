@@ -85,12 +85,13 @@ func (b *Bucket) ChangeRoom(newRoomID string, channel *Channel) (err error) {
 
 	lockStart := time.Now()
 	b.cLock.Lock()
-	recordCriticalLockBlock("bucket", "change_room", time.Since(lockStart))
+	lockBlock := time.Since(lockStart)
 	if newRoom, ok = b.rooms[newRoomID]; !ok {
 		newRoom = NewRoom(newRoomID)
 		b.rooms[newRoomID] = newRoom
 	}
 	b.cLock.Unlock()
+	recordCriticalLockBlock("bucket", "change_room", lockBlock)
 
 	if originalRoom != nil && originalRoom.Del(channel) {
 		b.DelRoom(originalRoom)
@@ -114,7 +115,7 @@ func (b *Bucket) Put(roomId string, channel *Channel) (err error) {
 
 	lockStart := time.Now()
 	b.cLock.Lock()
-	recordCriticalLockBlock("bucket", "put", time.Since(lockStart))
+	lockBlock := time.Since(lockStart)
 
 	if oldChannel := b.chs[channel.Key]; oldChannel != nil {
 		oldChannel.Close()
@@ -133,6 +134,7 @@ func (b *Bucket) Put(roomId string, channel *Channel) (err error) {
 
 	b.ipCnts[channel.IP]++
 	b.cLock.Unlock()
+	recordCriticalLockBlock("bucket", "put", lockBlock)
 	if room != nil {
 		err = room.Put(channel)
 	}
@@ -145,7 +147,7 @@ func (b *Bucket) Del(dch *Channel) {
 
 	lockStart := time.Now()
 	b.cLock.Lock()
-	recordCriticalLockBlock("bucket", "del", time.Since(lockStart))
+	lockBlock := time.Since(lockStart)
 
 	if ch, ok := b.chs[dch.Key]; ok {
 		if ch == dch {
@@ -160,6 +162,7 @@ func (b *Bucket) Del(dch *Channel) {
 	}
 
 	b.cLock.Unlock()
+	recordCriticalLockBlock("bucket", "del", lockBlock)
 
 	if room != nil && room.Del(dch) {
 		// if room channel is empty , then drop room
@@ -184,7 +187,7 @@ func (b *Bucket) broadcastSnapshot() ([]*Channel, func()) {
 
 	lockStart := time.Now()
 	b.cLock.RLock()
-	recordCriticalLockBlock("bucket", "broadcast_snapshot", time.Since(lockStart))
+	lockBlock := time.Since(lockStart)
 	snapshot := (*bufp)[:0]
 	if cap(snapshot) < len(b.chs) {
 		snapshot = make([]*Channel, 0, len(b.chs))
@@ -193,6 +196,7 @@ func (b *Bucket) broadcastSnapshot() ([]*Channel, func()) {
 		snapshot = append(snapshot, ch)
 	}
 	b.cLock.RUnlock()
+	recordCriticalLockBlock("bucket", "broadcast_snapshot", lockBlock)
 
 	*bufp = snapshot
 	release := func() {
@@ -248,9 +252,10 @@ func (b *Bucket) Room(roomId string) (room *Room) {
 func (b *Bucket) DelRoom(room *Room) {
 	lockStart := time.Now()
 	b.cLock.Lock()
-	recordCriticalLockBlock("bucket", "del_room", time.Since(lockStart))
+	lockBlock := time.Since(lockStart)
 	delete(b.rooms, room.ID)
 	b.cLock.Unlock()
+	recordCriticalLockBlock("bucket", "del_room", lockBlock)
 	room.Close()
 }
 
