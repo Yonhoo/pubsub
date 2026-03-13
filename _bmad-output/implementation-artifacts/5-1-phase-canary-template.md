@@ -1,6 +1,6 @@
 # Story 5.1: 阶段灰度策略模板化
 
-Status: review
+Status: done
 
 ## Story
 
@@ -42,6 +42,7 @@ so that 发布风险可控且执行一致。
 - 2026-03-13: 开发与验证通过，Story 状态更新为 `review`。
 - 2026-03-13: 修复 code review findings：拒绝多 document YAML、拒绝空白 criteria 条目、对齐 docs 必填字段，并补回归测试。
 - 2026-03-13: review fix 验证通过，Story 保持 `review`。
+- 2026-03-13: re-review approved，Story 状态更新为 `done`。
 
 ## Dev Agent Record
 
@@ -63,6 +64,7 @@ Amelia-context / dev-story
   - `success_criteria` / `abort_criteria` 现在要求至少一条非空、非纯空白规则；
   - 文档已补齐 `service` 必填说明；
   - 已补多 document、空白规则、未知字段、顶层必填字段缺失的回归测试。
+- re-review 结论为 Approve，可关闭 Story 并进入后续 Epic 5 backlog。
 
 ### File List
 - `/mnt/pubsub/_bmad-output/implementation-artifacts/5-1-phase-canary-template.md`
