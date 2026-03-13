@@ -55,7 +55,7 @@ development_status:
   epic-4: backlog
   4-1-dual-channel-config-for-capacity-params: done
   4-2-profiling-toggle-strategy: done
-  4-3-unified-critical-metrics-export: backlog
+  4-3-unified-critical-metrics-export: ready-for-dev
   epic-4-retrospective: optional
 
   epic-5: backlog
