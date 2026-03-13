@@ -554,6 +554,11 @@ func (h *ProtoMessageHandler) closeSessionResources() {
 // cleanupUser 先做本地解绑，再把 LeaveRoom 交给异步队列。
 // Join 仍保持同步确认；只有 Leave 改为异步化。
 func (h *ProtoMessageHandler) cleanupUser() {
+	start := time.Now()
+	result := "success"
+	defer func() {
+		recordCriticalCloseLatency("cleanup_user", result, time.Since(start))
+	}()
 	h.rwlock.RLock()
 	auth := h.auth
 	roomId := h.roomId
@@ -563,6 +568,7 @@ func (h *ProtoMessageHandler) cleanupUser() {
 	h.rwlock.RUnlock()
 
 	if !auth || roomId == "" || userId == "" {
+		result = "skipped"
 		return
 	}
 
@@ -572,6 +578,7 @@ func (h *ProtoMessageHandler) cleanupUser() {
 	}
 	if h.server != nil {
 		if err := h.server.EnqueueLeave(userId, roomId); err != nil {
+			result = "leave_enqueue_failed"
 			wsLog("⚠️  [ProtoHandler] LeaveRoom 入队失败 user=%s room=%s err=%v", userId, roomId, err)
 		}
 	}
@@ -702,6 +709,7 @@ func (h *ProtoMessageHandler) recordSharedWriterEnqueue(source string, err error
 	if h.server != nil && h.server.metrics != nil {
 		h.server.metrics.RecordSharedWriterEnqueue(context.Background(), source, "failure", reason)
 	}
+	recordCriticalEnqueueFailure(source, reason)
 	now := time.Now().UnixNano()
 	last := atomic.LoadInt64(&h.batchLastFailLogNano)
 	if now-last < int64(queueFullLogWindow) {

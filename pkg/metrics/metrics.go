@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
@@ -34,15 +35,19 @@ type MetricsCollector struct {
 	serviceID   string
 
 	// Controller metrics
-	totalRooms               metric.Int64UpDownCounter
-	totalUsers               metric.Int64UpDownCounter
-	totalNodes               metric.Int64UpDownCounter
-	roomUserCount            metric.Int64ObservableGauge
-	apiRequestCount          metric.Int64Counter
-	apiErrorCount            metric.Int64Counter
-	sharedWriterEnqueueTotal metric.Int64Counter
-	leaveOutcomeTotal        metric.Int64Counter
-	nodeConnections          metric.Int64ObservableGauge
+	totalRooms                   metric.Int64UpDownCounter
+	totalUsers                   metric.Int64UpDownCounter
+	totalNodes                   metric.Int64UpDownCounter
+	roomUserCount                metric.Int64ObservableGauge
+	apiRequestCount              metric.Int64Counter
+	apiErrorCount                metric.Int64Counter
+	sharedWriterEnqueueTotal     metric.Int64Counter
+	leaveOutcomeTotal            metric.Int64Counter
+	criticalDropTotal            metric.Int64Counter
+	criticalEnqueueFailTotal     metric.Int64Counter
+	criticalLockBlockDuration    metric.Float64Histogram
+	criticalCloseLatencyDuration metric.Float64Histogram
+	nodeConnections              metric.Int64ObservableGauge
 
 	// 用于计算当前值
 	mu                 sync.RWMutex
@@ -127,6 +132,42 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 		"pubsub.leave.total",
 		metric.WithDescription("Leave queue outcomes by result and reason"),
 		metric.WithUnit("{leave}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	mc.criticalDropTotal, err = meter.Int64Counter(
+		"pubsub.critical.drop.total",
+		metric.WithDescription("Critical drop events by kind and reason"),
+		metric.WithUnit("{drop}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	mc.criticalEnqueueFailTotal, err = meter.Int64Counter(
+		"pubsub.critical.enqueue_fail.total",
+		metric.WithDescription("Critical enqueue failures by source and reason"),
+		metric.WithUnit("{failure}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	mc.criticalLockBlockDuration, err = meter.Float64Histogram(
+		"pubsub.critical.lock_block.duration",
+		metric.WithDescription("Lock wait duration for critical operations"),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	mc.criticalCloseLatencyDuration, err = meter.Float64Histogram(
+		"pubsub.critical.close_latency.duration",
+		metric.WithDescription("Close path latency for critical operations"),
+		metric.WithUnit("ms"),
 	)
 	if err != nil {
 		return nil, err
@@ -240,6 +281,50 @@ func (m *MetricsCollector) RecordLeaveOutcome(ctx context.Context, result, reaso
 		attribute.String("reason", reason),
 	}
 	m.leaveOutcomeTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (m *MetricsCollector) RecordCriticalDrop(ctx context.Context, kind, reason string) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("kind", kind),
+		attribute.String("reason", reason),
+	}
+	m.criticalDropTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (m *MetricsCollector) RecordCriticalEnqueueFailure(ctx context.Context, source, reason string) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("source", source),
+		attribute.String("reason", reason),
+	}
+	m.criticalEnqueueFailTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (m *MetricsCollector) RecordCriticalLockBlock(ctx context.Context, scope, op string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("scope", scope),
+		attribute.String("op", op),
+	}
+	m.criticalLockBlockDuration.Record(ctx, float64(duration.Microseconds())/1000.0, metric.WithAttributes(attrs...))
+}
+
+func (m *MetricsCollector) RecordCriticalCloseLatency(ctx context.Context, path, result string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("path", path),
+		attribute.String("result", result),
+	}
+	m.criticalCloseLatencyDuration.Record(ctx, float64(duration.Microseconds())/1000.0, metric.WithAttributes(attrs...))
 }
 
 // ========== Getters ==========

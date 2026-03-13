@@ -80,6 +80,7 @@ func main() {
 
 	// 初始化 Metrics
 	metricsCollector, err := metrics.NewMetricsCollector(cfg.nodeID, "connect-node")
+	setCriticalMetricsCollector(metricsCollector)
 	log.Printf("✅ Metrics 初始化成功\n")
 
 	// 先注册到 ETCD，让其他服务能发现本服务

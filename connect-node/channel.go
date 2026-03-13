@@ -129,6 +129,7 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 		// 直写共享写队列失败，按丢弃处理（保持非阻塞语义）
 		dropCount := atomic.AddInt64(&c.pushDropCount, 1)
 		globalDrop := atomic.AddInt64(&globalPushDropCount, 1)
+		recordCriticalDrop("push", sharedWriterDropReason(err))
 		if dropCount%100 == 1 {
 			dropLog("⚠️  [Channel.Push] Shared writer enqueue failed! Key=%s, Room=%s, Err=%v, DropCount=%d, GlobalDrop=%d",
 				c.Key,
@@ -151,6 +152,7 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 	default:
 		// signal channel 满了，消息被丢弃
 		err = pkg.ErrSignalFullMsgDropped
+		recordCriticalDrop("push", "signal_full")
 
 		// 增加丢弃计数
 		dropCount := atomic.AddInt64(&c.pushDropCount, 1)
@@ -214,6 +216,7 @@ func (c *Channel) Signal() {
 	default:
 		atomic.AddInt64(&c.signalDropCount, 1)
 		atomic.AddInt64(&globalSignalDropCount, 1)
+		recordCriticalDrop("signal", "coalesced")
 	}
 }
 
@@ -246,4 +249,17 @@ func GetGlobalDropCount() int64 {
 // GetGlobalSignalDropCount 获取全局 ready signal 丢弃次数。
 func GetGlobalSignalDropCount() int64 {
 	return atomic.LoadInt64(&globalSignalDropCount)
+}
+
+func sharedWriterDropReason(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if err == pkg.ErrSignalFullMsgDropped {
+		return "signal_full"
+	}
+	if err.Error() == "shared writer queue full" {
+		return "queue_full"
+	}
+	return "enqueue_failed"
 }

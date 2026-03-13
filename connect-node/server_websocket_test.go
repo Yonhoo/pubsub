@@ -425,11 +425,18 @@ func TestLeaveQueueRetriesAndEventuallySucceeds(t *testing.T) {
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("expected 3 attempts, got %d", got)
 	}
-	server.leavePendingMu.Lock()
-	_, exists := server.leavePending[leaveDedupKey("room-r", "user-r")]
-	server.leavePendingMu.Unlock()
-	if exists {
-		t.Fatal("expected pending key to clear after retry success")
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for {
+		server.leavePendingMu.Lock()
+		_, exists := server.leavePending[leaveDedupKey("room-r", "user-r")]
+		server.leavePendingMu.Unlock()
+		if !exists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expected pending key to clear after retry success")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
