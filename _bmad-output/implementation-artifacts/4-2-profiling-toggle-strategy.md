@@ -1,6 +1,6 @@
 # Story 4.2: Profiling 开关策略落地
 
-Status: review
+Status: done
 
 ## Story
 
@@ -61,3 +61,7 @@ Amelia-context / dev-story
 - `/mnt/pubsub/connect-node/profiling.go`
 - `/mnt/pubsub/connect-node/profiling_test.go`
 - `/mnt/pubsub/_bmad-output/implementation-artifacts/4-2-profiling-toggle-strategy.md`
+
+## Review Outcome
+
+- 2026-03-13: 执行 `/bmad-bmm-code-review`，结论 `Approve`。默认 profiling 低开销成立；pprof/mutex/block/write trace 环境变量口径一致；启动日志能正确反映 effective settings；未发现阻塞级配置回归或运行时风险。
