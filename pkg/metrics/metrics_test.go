@@ -15,6 +15,7 @@ func TestCriticalMetricsRecordersDoNotPanic(t *testing.T) {
 	ctx := context.Background()
 	mc.RecordCriticalDrop(ctx, "push", "queue_full")
 	mc.RecordCriticalEnqueueFailure(ctx, "response", "queue_full")
+	mc.RecordCriticalShutdownDrain(ctx, "leave_queue", "completed", 2)
 	mc.RecordCriticalLockBlock(ctx, "bucket", "put", 12*time.Millisecond)
 	mc.RecordCriticalCloseLatency(ctx, "cleanup_user", "success", 3*time.Millisecond)
 }
@@ -26,6 +27,7 @@ func TestCriticalMetricSpecsStable(t *testing.T) {
 		{Name: MetricNameLeaveTotal, LabelKeys: []string{"result", "reason"}},
 		{Name: MetricNameCriticalDropTotal, LabelKeys: []string{"kind", "reason"}},
 		{Name: MetricNameCriticalEnqueueFailTotal, LabelKeys: []string{"source", "reason"}},
+		{Name: MetricNameCriticalShutdownDrain, LabelKeys: []string{"component", "outcome"}},
 		{Name: MetricNameCriticalLockBlockDur, LabelKeys: []string{"scope", "op"}},
 		{Name: MetricNameCriticalCloseCleanupDur, LabelKeys: []string{"path", "result"}},
 	}

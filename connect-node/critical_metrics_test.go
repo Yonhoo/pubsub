@@ -12,6 +12,7 @@ func TestCriticalMetricHooksAreNilSafe(t *testing.T) {
 	recordCriticalEnqueueFailure("response", "queue_full")
 	recordCriticalLockBlock("bucket", "put", 0)
 	recordCriticalCloseLatency("cleanup_user", "success", 0)
+	recordCriticalShutdownDrain("leave_queue", "completed", 1)
 }
 
 func TestCriticalCloseCleanupMetricNameIsStable(t *testing.T) {

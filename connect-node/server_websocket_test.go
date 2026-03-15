@@ -679,6 +679,152 @@ func TestRecordEnqueueFailureReportsMetricsReason(t *testing.T) {
 	}
 }
 
+func TestStopDuringLeaveRetryDelayClearsPendingAndKeepsDrainSummary(t *testing.T) {
+	firstAttemptDone := make(chan struct{}, 1)
+	server := &ConnectNodeServer{
+		controllerClient: &stubControllerClient{leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			select {
+			case firstAttemptDone <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("retry-me")
+		}},
+		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
+		leaveRetryDelay:          120 * time.Millisecond,
+		leaveMaxAttempts:         3,
+		leavePending:             make(map[string]struct{}),
+		stopDrainTimeout:         60 * time.Millisecond,
+	}
+	server.initLeaveWorkers(1, 8)
+
+	if err := server.EnqueueLeave("user-retry-stop", "room-retry-stop"); err != nil {
+		t.Fatalf("enqueue leave failed: %v", err)
+	}
+
+	select {
+	case <-firstAttemptDone:
+	case <-time.After(time.Second):
+		t.Fatal("expected first leave attempt before stopping")
+	}
+
+	server.Stop()
+	time.Sleep(200 * time.Millisecond)
+
+	key := leaveDedupKey("room-retry-stop", "user-retry-stop")
+	server.leavePendingMu.Lock()
+	_, exists := server.leavePending[key]
+	server.leavePendingMu.Unlock()
+	if exists {
+		t.Fatal("expected pending key cleared after stop during retry delay")
+	}
+
+	summary := server.LastShutdownDrainSummary()
+	if summary.Leave.TimeoutAbandoned != 0 || summary.Leave.NotStarted != 0 {
+		t.Fatalf("expected no leave timeout/not_started in retry-delay stop, got %+v", summary.Leave)
+	}
+}
+
+func TestStopDrainSummaryClassifiesLeaveTimeoutAbandoned(t *testing.T) {
+	leaveStarted := make(chan struct{}, 1)
+	releaseLeave := make(chan struct{})
+	server := &ConnectNodeServer{
+		controllerClient: &stubControllerClient{leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			select {
+			case leaveStarted <- struct{}{}:
+			default:
+			}
+			<-releaseLeave
+			return &controller.LeaveRoomResponse{}, nil
+		}},
+		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
+		leavePending:             make(map[string]struct{}),
+		stopDrainTimeout:         60 * time.Millisecond,
+	}
+	server.initLeaveWorkers(1, 8)
+
+	if err := server.EnqueueLeave("user-timeout", "room-timeout"); err != nil {
+		t.Fatalf("enqueue leave failed: %v", err)
+	}
+
+	select {
+	case <-leaveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected leave worker to start")
+	}
+
+	started := time.Now()
+	server.Stop()
+	elapsed := time.Since(started)
+	if elapsed < 50*time.Millisecond {
+		t.Fatalf("expected stop to wait for drain timeout, got %v", elapsed)
+	}
+
+	summary := server.LastShutdownDrainSummary()
+	if !summary.TimedOut {
+		t.Fatalf("expected timeout summary, got %+v", summary)
+	}
+	if summary.Leave.TimeoutAbandoned != 1 || summary.Leave.NotStarted != 0 || summary.Leave.Completed != 0 {
+		t.Fatalf("unexpected leave summary: %+v", summary.Leave)
+	}
+
+	close(releaseLeave)
+}
+
+func TestStopDrainSummaryClassifiesRoomNotStartedAndTimeoutAbandoned(t *testing.T) {
+	roomBlockStarted := make(chan struct{}, 1)
+	releaseRoomPush := make(chan struct{})
+
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8, RoutineAmount: 1, RoutineSize: 8}
+	bucket := NewBucket(bucketCfg)
+	ch := NewChannel(8, 8)
+	ch.Key = "room-user"
+	ch.SetServerPushWriter(func(*proto.Proto) error {
+		select {
+		case roomBlockStarted <- struct{}{}:
+		default:
+		}
+		<-releaseRoomPush
+		return nil
+	})
+	if err := bucket.Put("room-drain", ch); err != nil {
+		t.Fatalf("bucket put failed: %v", err)
+	}
+
+	server := &ConnectNodeServer{
+		buckets:                  []*Bucket{bucket},
+		bucketIdx:                1,
+		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
+		stopDrainTimeout:         60 * time.Millisecond,
+	}
+	server.initRoomWorkers(1, 8)
+
+	firstReq := &push.BroadcastRoomReq{RoomID: "room-drain", Proto: &proto.Proto{Op: 2, Seq: 1}}
+	secondReq := &push.BroadcastRoomReq{RoomID: "room-drain", Proto: &proto.Proto{Op: 2, Seq: 2}}
+	if _, err := server.BroadcastRoom(context.Background(), firstReq); err != nil {
+		t.Fatalf("first enqueue failed: %v", err)
+	}
+	select {
+	case <-roomBlockStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected first room task to start")
+	}
+	if _, err := server.BroadcastRoom(context.Background(), secondReq); err != nil {
+		t.Fatalf("second enqueue failed: %v", err)
+	}
+
+	server.Stop()
+
+	summary := server.LastShutdownDrainSummary()
+	if !summary.TimedOut {
+		t.Fatalf("expected timeout summary, got %+v", summary)
+	}
+	if summary.Room.TimeoutAbandoned != 1 || summary.Room.NotStarted != 1 || summary.Room.Completed != 0 {
+		t.Fatalf("unexpected room summary: %+v", summary.Room)
+	}
+
+	close(releaseRoomPush)
+}
+
 func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {
 	manager := newSharedWriteManager(1, 64, writeBatchMaxBytes, 50*time.Millisecond, b.N+1024)
 	h := &ProtoMessageHandler{
