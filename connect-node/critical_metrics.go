@@ -50,3 +50,12 @@ func recordCriticalCloseLatency(path, result string, duration time.Duration) {
 		mc.RecordCriticalCloseLatency(context.Background(), path, result, duration)
 	}
 }
+
+func recordCriticalShutdownDrain(component, outcome string, count int64) {
+	if count <= 0 {
+		return
+	}
+	if mc := getCriticalMetricsCollector(); mc != nil {
+		mc.RecordCriticalShutdownDrain(context.Background(), component, outcome, count)
+	}
+}

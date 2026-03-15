@@ -77,13 +77,25 @@ type ConnectNodeServer struct {
 	queueStateMu             sync.RWMutex
 	queueState               uint32
 	queueRejectLogNano       int64
+	stopDrainTimeout         time.Duration
+	leaveWorkerWG            sync.WaitGroup
+	roomWorkerWG             sync.WaitGroup
+	leaveAccepted            int64
+	leaveStarted             int64
+	leaveCompleted           int64
+	roomAccepted             int64
+	roomStarted              int64
+	roomCompleted            int64
+	shutdownSummaryMu        sync.RWMutex
+	lastShutdownSummary      shutdownDrainSummary
 	stopOnce                 sync.Once
 }
 
 const (
 	queueStateRunning uint32 = iota
 	queueStateStopping
-	queueStateClosed
+	queueStateDraining
+	queueStateStopped
 )
 
 var (
@@ -125,6 +137,19 @@ type leaveTask struct {
 	roomID     string
 	attempts   int
 	enqueuedAt time.Time
+}
+
+type drainOutcome struct {
+	Completed        int64
+	TimeoutAbandoned int64
+	NotStarted       int64
+}
+
+type shutdownDrainSummary struct {
+	TimedOut bool
+	Duration time.Duration
+	Leave    drainOutcome
+	Room     drainOutcome
 }
 
 // NewConnectNodeServer 创建连接节点服务器
@@ -173,6 +198,7 @@ func NewConnectNodeServer(
 		leaveMaxAttempts:         3,
 		leavePending:             make(map[string]struct{}),
 		queueState:               queueStateRunning,
+		stopDrainTimeout:         5 * time.Second,
 		stopRoomSync:             make(chan struct{}),
 	}
 
@@ -220,6 +246,7 @@ func (s *ConnectNodeServer) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
+		stopBegin := time.Now()
 		s.queueStateMu.Lock()
 		if s.queueState != queueStateRunning {
 			s.queueStateMu.Unlock()
@@ -229,6 +256,11 @@ func (s *ConnectNodeServer) Stop() {
 		leaveQueue := s.leaveQueue
 		roomWorkers := append([]chan *push.BroadcastRoomReq(nil), s.roomWorkers...)
 		sharedWriter := s.sharedWriter
+		drainTimeout := s.stopDrainTimeout
+		if drainTimeout <= 0 {
+			drainTimeout = 5 * time.Second
+		}
+		s.queueState = queueStateDraining
 		s.queueStateMu.Unlock()
 
 		if leaveQueue != nil {
@@ -243,13 +275,40 @@ func (s *ConnectNodeServer) Stop() {
 			sharedWriter.Stop()
 		}
 
+		waitDone := make(chan struct{})
+		go func() {
+			s.leaveWorkerWG.Wait()
+			s.roomWorkerWG.Wait()
+			close(waitDone)
+		}()
+		timedOut := false
+		select {
+		case <-waitDone:
+		case <-time.After(drainTimeout):
+			timedOut = true
+		}
+
 		s.queueStateMu.Lock()
 		s.leaveQueue = nil
 		s.leaveWorkerNum = 0
 		s.roomWorkers = nil
 		s.roomWorkerNum = 0
-		s.queueState = queueStateClosed
+		s.queueState = queueStateStopped
 		s.queueStateMu.Unlock()
+
+		summary := s.buildShutdownSummary(timedOut, time.Since(stopBegin))
+		s.storeShutdownSummary(summary)
+		s.recordShutdownSummary(summary)
+		wsLog("ℹ️  [Shutdown] drain summary timeout=%t duration=%v leave(completed=%d timeout_abandoned=%d not_started=%d) room(completed=%d timeout_abandoned=%d not_started=%d)",
+			summary.TimedOut,
+			summary.Duration,
+			summary.Leave.Completed,
+			summary.Leave.TimeoutAbandoned,
+			summary.Leave.NotStarted,
+			summary.Room.Completed,
+			summary.Room.TimeoutAbandoned,
+			summary.Room.NotStarted,
+		)
 	})
 }
 
@@ -267,6 +326,7 @@ func (s *ConnectNodeServer) initRoomWorkers(workerNum uint64, queueSize int) {
 	for i := uint64(0); i < workerNum; i++ {
 		ch := make(chan *push.BroadcastRoomReq, queueSize)
 		s.roomWorkers[i] = ch
+		s.roomWorkerWG.Add(1)
 		go s.roomBroadcastProc(ch)
 	}
 }
@@ -286,16 +346,20 @@ func (s *ConnectNodeServer) initLeaveWorkers(workerNum uint64, queueSize int) {
 	s.leaveWorkerNum = uint32(workerNum)
 	s.queueState = queueStateRunning
 	for i := uint64(0); i < workerNum; i++ {
+		s.leaveWorkerWG.Add(1)
 		go s.leaveWorkerProc(s.leaveQueue)
 	}
 }
 
 func (s *ConnectNodeServer) leaveWorkerProc(ch <-chan *leaveTask) {
+	defer s.leaveWorkerWG.Done()
 	for task := range ch {
 		if task == nil {
 			continue
 		}
+		atomic.AddInt64(&s.leaveStarted, 1)
 		s.processLeaveTask(task)
+		atomic.AddInt64(&s.leaveCompleted, 1)
 	}
 }
 
@@ -369,6 +433,7 @@ func (s *ConnectNodeServer) enqueueLeaveTask(task *leaveTask, markPending bool) 
 	select {
 	case leaveQueue <- task:
 		s.queueStateMu.RUnlock()
+		atomic.AddInt64(&s.leaveAccepted, 1)
 		return nil
 	case <-enqueueCtx.Done():
 		s.queueStateMu.RUnlock()
@@ -475,15 +540,18 @@ func (s *ConnectNodeServer) scheduleLeaveRetry(task *leaveTask) {
 }
 
 func (s *ConnectNodeServer) roomBroadcastProc(ch chan *push.BroadcastRoomReq) {
+	defer s.roomWorkerWG.Done()
 	for req := range ch {
 		if req == nil || req.Proto == nil || req.RoomID == "" {
 			continue
 		}
+		atomic.AddInt64(&s.roomStarted, 1)
 		for _, bucket := range s.Buckets() {
 			if room := bucket.Room(req.RoomID); room != nil {
 				room.PushMsg(req.Proto)
 			}
 		}
+		atomic.AddInt64(&s.roomCompleted, 1)
 	}
 }
 
@@ -608,6 +676,7 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 	select {
 	case ch <- req:
 		s.queueStateMu.RUnlock()
+		atomic.AddInt64(&s.roomAccepted, 1)
 		return &push.BroadcastRoomReply{}, nil
 	case <-enqueueCtx.Done():
 		s.queueStateMu.RUnlock()
@@ -621,7 +690,7 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 }
 
 func queueStateErr(state uint32) error {
-	if state == queueStateClosed {
+	if state == queueStateStopped {
 		return ErrWorkerQueueClosed
 	}
 	return ErrWorkerQueueStopping
@@ -659,6 +728,77 @@ func (s *ConnectNodeServer) recordEnqueueFailure(source string, err error) {
 		return
 	}
 	wsLog("⚠️  [Queue] enqueue rejected source=%s reason=%s err=%v", source, reason, err)
+}
+
+func classifyDrainOutcome(accepted, started, completed int64, timedOut bool) drainOutcome {
+	if accepted < 0 {
+		accepted = 0
+	}
+	if started < 0 {
+		started = 0
+	}
+	if completed < 0 {
+		completed = 0
+	}
+	if started > accepted {
+		started = accepted
+	}
+	if completed > started {
+		completed = started
+	}
+	out := drainOutcome{
+		Completed: completed,
+	}
+	if timedOut {
+		out.TimeoutAbandoned = started - completed
+		if out.TimeoutAbandoned < 0 {
+			out.TimeoutAbandoned = 0
+		}
+		out.NotStarted = accepted - started
+		if out.NotStarted < 0 {
+			out.NotStarted = 0
+		}
+	}
+	return out
+}
+
+func (s *ConnectNodeServer) buildShutdownSummary(timedOut bool, duration time.Duration) shutdownDrainSummary {
+	leaveAccepted := atomic.LoadInt64(&s.leaveAccepted)
+	leaveStarted := atomic.LoadInt64(&s.leaveStarted)
+	leaveCompleted := atomic.LoadInt64(&s.leaveCompleted)
+	roomAccepted := atomic.LoadInt64(&s.roomAccepted)
+	roomStarted := atomic.LoadInt64(&s.roomStarted)
+	roomCompleted := atomic.LoadInt64(&s.roomCompleted)
+	return shutdownDrainSummary{
+		TimedOut: timedOut,
+		Duration: duration,
+		Leave:    classifyDrainOutcome(leaveAccepted, leaveStarted, leaveCompleted, timedOut),
+		Room:     classifyDrainOutcome(roomAccepted, roomStarted, roomCompleted, timedOut),
+	}
+}
+
+func (s *ConnectNodeServer) storeShutdownSummary(summary shutdownDrainSummary) {
+	s.shutdownSummaryMu.Lock()
+	s.lastShutdownSummary = summary
+	s.shutdownSummaryMu.Unlock()
+}
+
+func (s *ConnectNodeServer) LastShutdownDrainSummary() shutdownDrainSummary {
+	if s == nil {
+		return shutdownDrainSummary{}
+	}
+	s.shutdownSummaryMu.RLock()
+	defer s.shutdownSummaryMu.RUnlock()
+	return s.lastShutdownSummary
+}
+
+func (s *ConnectNodeServer) recordShutdownSummary(summary shutdownDrainSummary) {
+	recordCriticalShutdownDrain("leave_queue", "completed", summary.Leave.Completed)
+	recordCriticalShutdownDrain("leave_queue", "timeout_abandoned", summary.Leave.TimeoutAbandoned)
+	recordCriticalShutdownDrain("leave_queue", "not_started", summary.Leave.NotStarted)
+	recordCriticalShutdownDrain("room_worker", "completed", summary.Room.Completed)
+	recordCriticalShutdownDrain("room_worker", "timeout_abandoned", summary.Room.TimeoutAbandoned)
+	recordCriticalShutdownDrain("room_worker", "not_started", summary.Room.NotStarted)
 }
 
 func (s *ConnectNodeServer) Rooms(ctx context.Context, req *push.RoomsReq) (*push.RoomsReply, error) {

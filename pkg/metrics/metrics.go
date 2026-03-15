@@ -45,6 +45,7 @@ type MetricsCollector struct {
 	leaveOutcomeTotal            metric.Int64Counter
 	criticalDropTotal            metric.Int64Counter
 	criticalEnqueueFailTotal     metric.Int64Counter
+	criticalShutdownDrainTotal   metric.Int64Counter
 	criticalLockBlockDuration    metric.Float64Histogram
 	criticalCloseCleanupDuration metric.Float64Histogram
 	nodeConnections              metric.Int64ObservableGauge
@@ -68,6 +69,7 @@ const (
 	MetricNameLeaveTotal               = "pubsub.leave.total"
 	MetricNameCriticalDropTotal        = "pubsub.critical.drop.total"
 	MetricNameCriticalEnqueueFailTotal = "pubsub.critical.enqueue_fail.total"
+	MetricNameCriticalShutdownDrain    = "pubsub.critical.shutdown_drain.total"
 	MetricNameCriticalLockBlockDur     = "pubsub.critical.lock_block.duration"
 	MetricNameCriticalCloseCleanupDur  = "pubsub.critical.close_cleanup.duration"
 )
@@ -77,6 +79,7 @@ var criticalMetricSpecs = []MetricSpec{
 	{Name: MetricNameLeaveTotal, LabelKeys: []string{"result", "reason"}},
 	{Name: MetricNameCriticalDropTotal, LabelKeys: []string{"kind", "reason"}},
 	{Name: MetricNameCriticalEnqueueFailTotal, LabelKeys: []string{"source", "reason"}},
+	{Name: MetricNameCriticalShutdownDrain, LabelKeys: []string{"component", "outcome"}},
 	{Name: MetricNameCriticalLockBlockDur, LabelKeys: []string{"scope", "op"}},
 	{Name: MetricNameCriticalCloseCleanupDur, LabelKeys: []string{"path", "result"}},
 }
@@ -185,6 +188,14 @@ func NewMetricsCollector(serviceID, serviceName string) (*MetricsCollector, erro
 		MetricNameCriticalEnqueueFailTotal,
 		metric.WithDescription("Critical enqueue failures by source and reason"),
 		metric.WithUnit("{failure}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	mc.criticalShutdownDrainTotal, err = meter.Int64Counter(
+		MetricNameCriticalShutdownDrain,
+		metric.WithDescription("Shutdown drain outcome by component and outcome"),
+		metric.WithUnit("{task}"),
 	)
 	if err != nil {
 		return nil, err
@@ -338,6 +349,17 @@ func (m *MetricsCollector) RecordCriticalEnqueueFailure(ctx context.Context, sou
 		attribute.String("reason", reason),
 	}
 	m.criticalEnqueueFailTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+func (m *MetricsCollector) RecordCriticalShutdownDrain(ctx context.Context, component, outcome string, count int64) {
+	if m == nil || count <= 0 {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("component", component),
+		attribute.String("outcome", outcome),
+	}
+	m.criticalShutdownDrainTotal.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
 func (m *MetricsCollector) RecordCriticalLockBlock(ctx context.Context, scope, op string, duration time.Duration) {
