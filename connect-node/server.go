@@ -642,12 +642,14 @@ func enqueueRejectReason(err error) string {
 	}
 }
 
+var criticalEnqueueFailureRecorder = recordCriticalEnqueueFailure
+
 func (s *ConnectNodeServer) recordEnqueueFailure(source string, err error) {
 	if s == nil {
 		return
 	}
 	reason := enqueueRejectReason(err)
-	recordCriticalEnqueueFailure(source, reason)
+	criticalEnqueueFailureRecorder(source, reason)
 	now := time.Now().UnixNano()
 	last := atomic.LoadInt64(&s.queueRejectLogNano)
 	if now-last < int64(time.Second) {

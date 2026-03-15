@@ -632,6 +632,53 @@ func TestEnqueueLeaveTaskPendingDedupReturnsStopErrorWhenQueueStopping(t *testin
 	}
 }
 
+func TestRecordEnqueueFailureReportsMetricsReason(t *testing.T) {
+	server := &ConnectNodeServer{}
+
+	originalRecorder := criticalEnqueueFailureRecorder
+	defer func() {
+		criticalEnqueueFailureRecorder = originalRecorder
+	}()
+
+	cases := []struct {
+		name       string
+		source     string
+		err        error
+		wantReason string
+	}{
+		{name: "queue_full", source: "leave_queue", err: context.DeadlineExceeded, wantReason: "queue_full"},
+		{name: "stopping", source: "leave_queue", err: ErrWorkerQueueStopping, wantReason: "stopping"},
+		{name: "closed", source: "broadcast_queue", err: ErrWorkerQueueClosed, wantReason: "closed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				gotSource string
+				gotReason string
+				calls     int
+			)
+			criticalEnqueueFailureRecorder = func(source, reason string) {
+				calls++
+				gotSource = source
+				gotReason = reason
+			}
+
+			server.recordEnqueueFailure(tc.source, tc.err)
+
+			if calls != 1 {
+				t.Fatalf("expected metrics recorder called once, got %d", calls)
+			}
+			if gotSource != tc.source {
+				t.Fatalf("expected source %q, got %q", tc.source, gotSource)
+			}
+			if gotReason != tc.wantReason {
+				t.Fatalf("expected reason %q, got %q", tc.wantReason, gotReason)
+			}
+		})
+	}
+}
+
 func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {
 	manager := newSharedWriteManager(1, 64, writeBatchMaxBytes, 50*time.Millisecond, b.N+1024)
 	h := &ProtoMessageHandler{
