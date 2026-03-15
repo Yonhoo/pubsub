@@ -271,9 +271,6 @@ func (s *ConnectNodeServer) Stop() {
 				close(ch)
 			}
 		}
-		if sharedWriter != nil {
-			sharedWriter.Stop()
-		}
 
 		waitDone := make(chan struct{})
 		go func() {
@@ -286,6 +283,9 @@ func (s *ConnectNodeServer) Stop() {
 		case <-waitDone:
 		case <-time.After(drainTimeout):
 			timedOut = true
+		}
+		if sharedWriter != nil {
+			sharedWriter.Stop()
 		}
 
 		s.queueStateMu.Lock()
