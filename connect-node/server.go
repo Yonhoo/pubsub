@@ -101,6 +101,7 @@ const (
 var (
 	codeErrQueueStopping   = errors.New("worker queue stopping")
 	codeErrQueueClosed     = errors.New("worker queue closed")
+	errNilLeaveResponse    = errors.New("nil response")
 	ErrWorkerQueueStopping = &queueStateError{
 		cause: codeErrQueueStopping,
 		code:  codes.Unavailable,
@@ -377,6 +378,21 @@ func (s *ConnectNodeServer) EnqueueLeave(userID, roomID string) error {
 	return s.enqueueLeaveTask(task, true)
 }
 
+func (s *ConnectNodeServer) EnqueueLeaveWithShutdownFallback(userID, roomID string) error {
+	if s == nil || userID == "" || roomID == "" {
+		return nil
+	}
+	err := s.EnqueueLeave(userID, roomID)
+	if err == nil {
+		return nil
+	}
+	if !isLeaveEnqueueCompensable(err) {
+		return err
+	}
+	s.dispatchDirectLeaveCompensation(userID, roomID)
+	return nil
+}
+
 func (s *ConnectNodeServer) enqueueLeaveTask(task *leaveTask, markPending bool) error {
 	if s == nil || task == nil || task.userID == "" || task.roomID == "" {
 		return nil
@@ -512,6 +528,67 @@ func (s *ConnectNodeServer) processLeaveTask(task *leaveTask) {
 		s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", "nil_response")
 	}
 	finish()
+}
+
+func isLeaveEnqueueCompensable(err error) bool {
+	return errors.Is(err, ErrWorkerQueueStopping) || errors.Is(err, ErrWorkerQueueClosed)
+}
+
+func (s *ConnectNodeServer) dispatchDirectLeaveCompensation(userID, roomID string) {
+	if s == nil || userID == "" || roomID == "" {
+		return
+	}
+	maxAttempts := s.leaveMaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	delay := s.leaveRetryDelay
+	if delay <= 0 {
+		delay = 200 * time.Millisecond
+	}
+	go func() {
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if s.controllerClient == nil {
+				wsLog("🚨 [LeaveCompensate] controller client unavailable user=%s room=%s", userID, roomID)
+				if s.metrics != nil {
+					s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", "controller_unavailable")
+				}
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			start := time.Now()
+			resp, err := s.controllerClient.LeaveRoom(ctx, &controller.LeaveRoomRequest{
+				UserId: userID,
+				RoomId: roomID,
+			}, grpc.WaitForReady(true))
+			cancel()
+			elapsed := time.Since(start)
+			if err == nil && resp != nil {
+				wsLog("✅ [LeaveCompensate] LeaveRoom 成功 user=%s room=%s attempts=%d elapsed=%v", userID, roomID, attempt, elapsed)
+				if s.metrics != nil {
+					s.metrics.RecordLeaveOutcome(context.Background(), "success", "none")
+				}
+				return
+			}
+			if err == nil {
+				err = errNilLeaveResponse
+			}
+			if attempt < maxAttempts {
+				wsLog("⚠️  [LeaveCompensate] LeaveRoom 重试 user=%s room=%s attempts=%d elapsed=%v err=%v", userID, roomID, attempt, elapsed, err)
+				time.Sleep(delay)
+				continue
+			}
+			wsLog("🚨 [LeaveCompensate] LeaveRoom 最终失败 user=%s room=%s attempts=%d elapsed=%v err=%v", userID, roomID, attempt, elapsed, err)
+			if s.metrics != nil {
+				reason := "rpc_error"
+				if errors.Is(err, errNilLeaveResponse) {
+					reason = "nil_response"
+				}
+				s.metrics.RecordLeaveOutcome(context.Background(), "final_failure", reason)
+			}
+			return
+		}
+	}()
 }
 
 func (s *ConnectNodeServer) scheduleLeaveRetry(task *leaveTask) {

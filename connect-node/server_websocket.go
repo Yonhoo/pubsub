@@ -579,7 +579,7 @@ func (h *ProtoMessageHandler) cleanupUser() {
 		channel.Room = nil
 	}
 	if h.server != nil {
-		if err := h.server.EnqueueLeave(userId, roomId); err != nil {
+		if err := h.server.EnqueueLeaveWithShutdownFallback(userId, roomId); err != nil {
 			result = "leave_enqueue_failed"
 			wsLog("⚠️  [ProtoHandler] LeaveRoom 入队失败 user=%s room=%s err=%v", userId, roomId, err)
 		}
