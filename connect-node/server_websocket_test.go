@@ -366,6 +366,220 @@ func TestCleanupUserUnbindsLocallyBeforeAsyncLeaveCompletes(t *testing.T) {
 	h.server.Stop()
 }
 
+func TestStopDefersSharedWriterStopUntilRoomDrainCompletes(t *testing.T) {
+	manager := newSharedWriteManager(1, 1, writeBatchMaxBytes, time.Second, 8)
+	manager.Start()
+
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8, RoutineAmount: 1, RoutineSize: 8}
+	bucket := NewBucket(bucketCfg)
+	ch := NewChannel(8, 8)
+	ch.Key = "room-drain-user"
+
+	firstPushStarted := make(chan struct{}, 1)
+	releaseFirstPush := make(chan struct{})
+	var pushCalls atomic.Int32
+	var pushFailures atomic.Int32
+	ch.SetServerPushWriter(func(p *proto.Proto) error {
+		if pushCalls.Add(1) == 1 {
+			select {
+			case firstPushStarted <- struct{}{}:
+			default:
+			}
+			<-releaseFirstPush
+		}
+		err := manager.TryEnqueue(1, p)
+		if err != nil {
+			pushFailures.Add(1)
+		}
+		return err
+	})
+	if err := bucket.Put("room-drain-shared-writer", ch); err != nil {
+		t.Fatalf("bucket put failed: %v", err)
+	}
+
+	server := &ConnectNodeServer{
+		sharedWriter:             manager,
+		buckets:                  []*Bucket{bucket},
+		bucketIdx:                1,
+		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
+		stopDrainTimeout:         500 * time.Millisecond,
+	}
+	server.initRoomWorkers(1, 8)
+
+	if _, err := server.BroadcastRoom(context.Background(), &push.BroadcastRoomReq{
+		RoomID: "room-drain-shared-writer",
+		Proto:  &proto.Proto{Op: 2, Seq: 1},
+	}); err != nil {
+		t.Fatalf("first room enqueue failed: %v", err)
+	}
+	select {
+	case <-firstPushStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected first room push to start")
+	}
+	if _, err := server.BroadcastRoom(context.Background(), &push.BroadcastRoomReq{
+		RoomID: "room-drain-shared-writer",
+		Proto:  &proto.Proto{Op: 2, Seq: 2},
+	}); err != nil {
+		t.Fatalf("second room enqueue failed: %v", err)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		server.Stop()
+		close(stopDone)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	close(releaseFirstPush)
+
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not complete in time")
+	}
+	if got := pushFailures.Load(); got != 0 {
+		t.Fatalf("expected no shared writer enqueue failures during drain, got %d", got)
+	}
+	if got := pushCalls.Load(); got != 2 {
+		t.Fatalf("expected 2 drained room pushes, got %d", got)
+	}
+}
+
+func TestCleanupUserCompensatesLeaveWhenQueueClosed(t *testing.T) {
+	leaveCalls := atomic.Int32{}
+	server := &ConnectNodeServer{
+		controllerClient: &stubControllerClient{leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			leaveCalls.Add(1)
+			return &controller.LeaveRoomResponse{}, nil
+		}},
+		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
+		leaveRetryDelay:          10 * time.Millisecond,
+		leaveMaxAttempts:         2,
+		leavePending:             make(map[string]struct{}),
+	}
+	server.initLeaveWorkers(1, 8)
+	server.queueStateMu.Lock()
+	close(server.leaveQueue)
+	server.leaveQueue = nil
+	server.queueState = queueStateStopped
+	server.queueStateMu.Unlock()
+	server.leaveWorkerWG.Wait()
+
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8}
+	bucket := NewBucket(bucketCfg)
+	ch := NewChannel(8, 8)
+	ch.Key = "compensate-user"
+	h := &ProtoMessageHandler{
+		server:   server,
+		channel:  ch,
+		bucket:   bucket,
+		roomId:   "room-compensate",
+		clientId: "user-compensate",
+		auth:     true,
+	}
+	if err := bucket.Put("room-compensate", ch); err != nil {
+		t.Fatalf("bucket put failed: %v", err)
+	}
+
+	start := time.Now()
+	h.cleanupUser()
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected cleanupUser to return quickly, took %v", elapsed)
+	}
+	if got := bucket.ChannelCount(); got != 0 {
+		t.Fatalf("expected local bucket cleanup before compensation leave, got %d channels", got)
+	}
+	if h.channel.Room != nil {
+		t.Fatalf("expected local channel room cleared, got %#v", h.channel.Room)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if leaveCalls.Load() == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected compensation leave call once, got %d", leaveCalls.Load())
+}
+
+func TestCleanupUserStormConcurrentWithStopKeepsLeaveEventuallyConsistent(t *testing.T) {
+	const sessions = 64
+	leaveCalls := atomic.Int32{}
+	server := &ConnectNodeServer{
+		controllerClient: &stubControllerClient{leaveRoomFn: func(ctx context.Context, in *controller.LeaveRoomRequest, opts ...grpc.CallOption) (*controller.LeaveRoomResponse, error) {
+			leaveCalls.Add(1)
+			return &controller.LeaveRoomResponse{}, nil
+		}},
+		roomWorkerEnqueueTimeout: 10 * time.Millisecond,
+		leaveRetryDelay:          10 * time.Millisecond,
+		leaveMaxAttempts:         2,
+		leavePending:             make(map[string]struct{}),
+		stopDrainTimeout:         300 * time.Millisecond,
+	}
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: sessions + 8, Room: sessions + 8}
+	bucket := NewBucket(bucketCfg)
+	server.buckets = []*Bucket{bucket}
+	server.bucketIdx = 1
+	server.initLeaveWorkers(1, sessions+8)
+
+	handlers := make([]*ProtoMessageHandler, 0, sessions)
+	for i := 0; i < sessions; i++ {
+		userID := fmt.Sprintf("storm-user-%d", i)
+		roomID := fmt.Sprintf("room-storm-%d", i)
+		ch := NewChannel(8, 8)
+		ch.Key = userID
+		h := &ProtoMessageHandler{
+			server:   server,
+			channel:  ch,
+			bucket:   bucket,
+			roomId:   roomID,
+			clientId: userID,
+			auth:     true,
+		}
+		if err := bucket.Put(roomID, ch); err != nil {
+			t.Fatalf("bucket put failed for %s: %v", userID, err)
+		}
+		handlers = append(handlers, h)
+	}
+
+	startGate := make(chan struct{})
+	var cleanupWG sync.WaitGroup
+	for _, h := range handlers {
+		cleanupWG.Add(1)
+		go func(handler *ProtoMessageHandler) {
+			defer cleanupWG.Done()
+			<-startGate
+			handler.cleanupUser()
+		}(h)
+	}
+	stopDone := make(chan struct{})
+	go func() {
+		<-startGate
+		time.Sleep(1 * time.Millisecond)
+		server.Stop()
+		close(stopDone)
+	}()
+
+	close(startGate)
+	cleanupWG.Wait()
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected stop to complete during cleanup storm")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if leaveCalls.Load() == sessions {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected %d leave calls under cleanup storm, got %d", sessions, leaveCalls.Load())
+}
+
 func TestLeaveQueueDeduplicatesRoomUserKey(t *testing.T) {
 	leaveCalls := atomic.Int32{}
 	releaseLeave := make(chan struct{})
