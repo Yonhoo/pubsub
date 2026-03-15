@@ -66,7 +66,7 @@ development_status:
   epic-5-retrospective: optional
 
   epic-6: backlog
-  6-1-stop-safe-queue-close-and-send-guards: review
+  6-1-stop-safe-queue-close-and-send-guards: done
   6-2-graceful-stop-drain-and-wait-semantics: ready-for-dev
   6-3-connect-node-integration-test-foundation-and-critical-scenarios: ready-for-dev
   6-4-whole-component-pprof-and-performance-baseline: ready-for-dev

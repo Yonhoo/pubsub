@@ -1,6 +1,6 @@
 # Story 6.1: 停机发送安全与队列关闭保护
 
-Status: review
+Status: done
 
 ## Story
 
@@ -62,6 +62,7 @@ so that 服务停机或灰度切换时不会触发 `send on closed channel` pani
 - 2026-03-15: 完成停机 send-safe 队列状态机、stopping/closed 错误类型与拒绝分类观测，新增停机并发回归测试，状态更新为 `review`。
 - 2026-03-15: Senior Developer Review (AI) 完成；发现阻塞问题，状态由 `review` 回退为 `in-progress`。
 - 2026-03-15: 修复 review 阻塞项：`enqueueLeaveTask` 去重分支在 stopping/closed 下返回稳定错误；补充 `recordEnqueueFailure` 的 metrics 上报断言测试，状态更新回 `review`。
+- 2026-03-15: Senior Developer Re-Review (AI) 完成；阻塞项关闭，状态由 `review` 更新为 `done`。
 
 ## Dev Agent Record
 
@@ -132,3 +133,43 @@ Codex (GPT-5) / dev-story
 - Task 1.2: **Partial**（存在 stopping/closed 下 `nil` 返回路径）。  
 - Task 3.3: **Not fully done**（缺 metrics 断言）。  
 - 其余已勾选任务：当前证据下可接受。
+
+## Senior Developer Re-Review (AI)
+
+### Reviewer
+
+- Yonhoo
+- Date: 2026-03-15
+- Outcome: Approved (Ready for done)
+
+### Focused Blocker Verification
+
+1. 已关闭：`enqueueLeaveTask` 去重命中在 `stopping/closed` 下返回 `nil` 的问题  
+   - 证据：`leavePending` 命中后新增 `queueState` + `leaveQueue` 检查，在非 running 或队列为空时返回 `ErrWorkerQueueStopping/ErrWorkerQueueClosed` 并记录拒绝原因。  
+   - 代码位置：`/mnt/pubsub/connect-node/server.go:327-337`。  
+   - 回归测试：`TestEnqueueLeaveTaskPendingDedupReturnsStopErrorWhenQueueStopping`。  
+   - 测试位置：`/mnt/pubsub/connect-node/server_websocket_test.go:608-633`。
+
+2. 已关闭：缺少 enqueue-failure metrics reason 断言测试  
+   - 证据：新增 `criticalEnqueueFailureRecorder` 可替换 recorder，并在测试中断言 `queue_full/stopping/closed` 三种 reason 的实际上报。  
+   - 代码位置：`/mnt/pubsub/connect-node/server.go:645-653`。  
+   - 回归测试：`TestRecordEnqueueFailureReportsMetricsReason`。  
+   - 测试位置：`/mnt/pubsub/connect-node/server_websocket_test.go:635-680`。
+
+### Findings
+
+1. **LOW（非阻塞）**: 工作区仍有与本 Story 无关的未提交变更（`_bmad-output/planning-artifacts/epics.md`、`logs/*`、`connect-node.test`、`mcp-config.json`、`package-lock.json`），建议在后续提交中分离，提升审计可追溯性。
+
+### AC Validation (Re-Review)
+
+- AC1: **Implemented**（`Stop` 与 enqueue 路径互斥保护，竞态回归测试覆盖）。  
+- AC2: **Implemented**（`EnqueueLeave` 在 stopping/closed 下返回稳定错误，不再静默 `nil`）。  
+- AC3: **Implemented**（`queue_full/stopping/closed` 原因分类 + metrics 上报断言 + 节流日志）。  
+- AC4: **Implemented**（未见对 Story 3.2/3.3 语义回退）。  
+- AC5: **Implemented**（`go test ./connect-node/...` 与 `go test -race ./connect-node/...` 通过，停机竞态测试存在）。
+
+### Task Audit (Re-Review)
+
+- Task 1.2: **Done**。  
+- Task 3.3: **Done**。  
+- 其余已勾选任务：**Done**。
