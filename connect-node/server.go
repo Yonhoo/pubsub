@@ -326,6 +326,15 @@ func (s *ConnectNodeServer) enqueueLeaveTask(task *leaveTask, markPending bool) 
 		s.leavePendingMu.Lock()
 		if _, ok := s.leavePending[key]; ok {
 			s.leavePendingMu.Unlock()
+			s.queueStateMu.RLock()
+			state := s.queueState
+			leaveQueue := s.leaveQueue
+			s.queueStateMu.RUnlock()
+			if state != queueStateRunning || leaveQueue == nil {
+				err := queueStateErr(state)
+				s.recordEnqueueFailure("leave_queue", err)
+				return err
+			}
 			return nil
 		}
 		s.leavePending[key] = struct{}{}

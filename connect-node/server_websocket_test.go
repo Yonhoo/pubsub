@@ -605,6 +605,33 @@ func TestEnqueueRejectReasonClassifiesQueueStates(t *testing.T) {
 	}
 }
 
+func TestEnqueueLeaveTaskPendingDedupReturnsStopErrorWhenQueueStopping(t *testing.T) {
+	server := &ConnectNodeServer{
+		leavePending:             make(map[string]struct{}),
+		roomWorkerEnqueueTimeout: 10 * time.Millisecond,
+	}
+	server.initLeaveWorkers(1, 1)
+	defer server.Stop()
+
+	task := &leaveTask{
+		key:    leaveDedupKey("room-stop", "user-stop"),
+		userID: "user-stop",
+		roomID: "room-stop",
+	}
+	server.leavePendingMu.Lock()
+	server.leavePending[task.key] = struct{}{}
+	server.leavePendingMu.Unlock()
+
+	server.queueStateMu.Lock()
+	server.queueState = queueStateStopping
+	server.queueStateMu.Unlock()
+
+	err := server.enqueueLeaveTask(task, true)
+	if !errors.Is(err, ErrWorkerQueueStopping) {
+		t.Fatalf("expected ErrWorkerQueueStopping for pending dedup during stopping, got %v", err)
+	}
+}
+
 func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {
 	manager := newSharedWriteManager(1, 64, writeBatchMaxBytes, 50*time.Millisecond, b.N+1024)
 	h := &ProtoMessageHandler{
