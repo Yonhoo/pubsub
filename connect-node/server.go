@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
@@ -73,7 +74,49 @@ type ConnectNodeServer struct {
 	leaveMaxAttempts         int
 	leavePendingMu           sync.Mutex
 	leavePending             map[string]struct{}
+	queueStateMu             sync.RWMutex
+	queueState               uint32
+	queueRejectLogNano       int64
 	stopOnce                 sync.Once
+}
+
+const (
+	queueStateRunning uint32 = iota
+	queueStateStopping
+	queueStateClosed
+)
+
+var (
+	codeErrQueueStopping   = errors.New("worker queue stopping")
+	codeErrQueueClosed     = errors.New("worker queue closed")
+	ErrWorkerQueueStopping = &queueStateError{
+		cause: codeErrQueueStopping,
+		code:  codes.Unavailable,
+		msg:   "worker queue stopping",
+	}
+	ErrWorkerQueueClosed = &queueStateError{
+		cause: codeErrQueueClosed,
+		code:  codes.Unavailable,
+		msg:   "worker queue closed",
+	}
+)
+
+type queueStateError struct {
+	cause error
+	code  codes.Code
+	msg   string
+}
+
+func (e *queueStateError) Error() string {
+	return e.msg
+}
+
+func (e *queueStateError) Unwrap() error {
+	return e.cause
+}
+
+func (e *queueStateError) GRPCStatus() *status.Status {
+	return status.New(e.code, e.msg)
 }
 
 type leaveTask struct {
@@ -129,6 +172,7 @@ func NewConnectNodeServer(
 		leaveRetryDelay:          200 * time.Millisecond,
 		leaveMaxAttempts:         3,
 		leavePending:             make(map[string]struct{}),
+		queueState:               queueStateRunning,
 		stopRoomSync:             make(chan struct{}),
 	}
 
@@ -176,21 +220,36 @@ func (s *ConnectNodeServer) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
-		if s.leaveQueue != nil {
-			close(s.leaveQueue)
-			s.leaveQueue = nil
-			s.leaveWorkerNum = 0
+		s.queueStateMu.Lock()
+		if s.queueState != queueStateRunning {
+			s.queueStateMu.Unlock()
+			return
 		}
-		for _, ch := range s.roomWorkers {
+		s.queueState = queueStateStopping
+		leaveQueue := s.leaveQueue
+		roomWorkers := append([]chan *push.BroadcastRoomReq(nil), s.roomWorkers...)
+		sharedWriter := s.sharedWriter
+		s.queueStateMu.Unlock()
+
+		if leaveQueue != nil {
+			close(leaveQueue)
+		}
+		for _, ch := range roomWorkers {
 			if ch != nil {
 				close(ch)
 			}
 		}
+		if sharedWriter != nil {
+			sharedWriter.Stop()
+		}
+
+		s.queueStateMu.Lock()
+		s.leaveQueue = nil
+		s.leaveWorkerNum = 0
 		s.roomWorkers = nil
 		s.roomWorkerNum = 0
-		if s.sharedWriter != nil {
-			s.sharedWriter.Stop()
-		}
+		s.queueState = queueStateClosed
+		s.queueStateMu.Unlock()
 	})
 }
 
@@ -204,6 +263,7 @@ func (s *ConnectNodeServer) initRoomWorkers(workerNum uint64, queueSize int) {
 
 	s.roomWorkers = make([]chan *push.BroadcastRoomReq, workerNum)
 	s.roomWorkerNum = uint32(workerNum)
+	s.queueState = queueStateRunning
 	for i := uint64(0); i < workerNum; i++ {
 		ch := make(chan *push.BroadcastRoomReq, queueSize)
 		s.roomWorkers[i] = ch
@@ -224,6 +284,7 @@ func (s *ConnectNodeServer) initLeaveWorkers(workerNum uint64, queueSize int) {
 	}
 	s.leaveQueue = make(chan *leaveTask, queueSize)
 	s.leaveWorkerNum = uint32(workerNum)
+	s.queueState = queueStateRunning
 	for i := uint64(0); i < workerNum; i++ {
 		go s.leaveWorkerProc(s.leaveQueue)
 	}
@@ -282,16 +343,34 @@ func (s *ConnectNodeServer) enqueueLeaveTask(task *leaveTask, markPending bool) 
 		enqueueCtx = context.Background()
 	}
 
-	select {
-	case s.leaveQueue <- task:
-		return nil
-	case <-enqueueCtx.Done():
+	s.queueStateMu.RLock()
+	state := s.queueState
+	leaveQueue := s.leaveQueue
+	if state != queueStateRunning || leaveQueue == nil {
+		s.queueStateMu.RUnlock()
 		if markPending {
 			s.leavePendingMu.Lock()
 			delete(s.leavePending, task.key)
 			s.leavePendingMu.Unlock()
 		}
-		return enqueueCtx.Err()
+		err := queueStateErr(state)
+		s.recordEnqueueFailure("leave_queue", err)
+		return err
+	}
+	select {
+	case leaveQueue <- task:
+		s.queueStateMu.RUnlock()
+		return nil
+	case <-enqueueCtx.Done():
+		s.queueStateMu.RUnlock()
+		if markPending {
+			s.leavePendingMu.Lock()
+			delete(s.leavePending, task.key)
+			s.leavePendingMu.Unlock()
+		}
+		err := enqueueCtx.Err()
+		s.recordEnqueueFailure("leave_queue", err)
+		return err
 	}
 }
 
@@ -487,7 +566,18 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 		log.Printf("[ConnectNodeServer] invalid args: roomID=%s, proto=%v", req.RoomID, req.Proto)
 		return nil, pkg.ErrBroadCastRoomArg
 	}
-	if len(s.roomWorkers) == 0 || s.roomWorkerNum == 0 {
+	s.queueStateMu.RLock()
+	state := s.queueState
+	roomWorkers := s.roomWorkers
+	roomWorkerNum := s.roomWorkerNum
+	if state != queueStateRunning {
+		s.queueStateMu.RUnlock()
+		err := queueStateErr(state)
+		s.recordEnqueueFailure("broadcast_queue", err)
+		return nil, err
+	}
+	if len(roomWorkers) == 0 || roomWorkerNum == 0 {
+		s.queueStateMu.RUnlock()
 		for _, bucket := range s.Buckets() {
 			if room := bucket.Room(req.RoomID); room != nil {
 				room.PushMsg(req.Proto)
@@ -496,8 +586,8 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 		return &push.BroadcastRoomReply{}, nil
 	}
 
-	idx := cityhash.CityHash32([]byte(req.RoomID), uint32(len(req.RoomID))) % s.roomWorkerNum
-	ch := s.roomWorkers[idx]
+	idx := cityhash.CityHash32([]byte(req.RoomID), uint32(len(req.RoomID))) % roomWorkerNum
+	ch := roomWorkers[idx]
 
 	enqueueCtx := ctx
 	if s.roomWorkerEnqueueTimeout > 0 {
@@ -508,13 +598,56 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 
 	select {
 	case ch <- req:
+		s.queueStateMu.RUnlock()
 		return &push.BroadcastRoomReply{}, nil
 	case <-enqueueCtx.Done():
+		s.queueStateMu.RUnlock()
 		if errors.Is(enqueueCtx.Err(), context.DeadlineExceeded) {
+			s.recordEnqueueFailure("broadcast_queue", enqueueCtx.Err())
 			return nil, status.Error(codes.ResourceExhausted, "room broadcast queue overloaded")
 		}
+		s.recordEnqueueFailure("broadcast_queue", enqueueCtx.Err())
 		return nil, enqueueCtx.Err()
 	}
+}
+
+func queueStateErr(state uint32) error {
+	if state == queueStateClosed {
+		return ErrWorkerQueueClosed
+	}
+	return ErrWorkerQueueStopping
+}
+
+func enqueueRejectReason(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "queue_full"
+	case errors.Is(err, ErrWorkerQueueStopping):
+		return "stopping"
+	case errors.Is(err, ErrWorkerQueueClosed):
+		return "closed"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "unknown"
+	}
+}
+
+func (s *ConnectNodeServer) recordEnqueueFailure(source string, err error) {
+	if s == nil {
+		return
+	}
+	reason := enqueueRejectReason(err)
+	recordCriticalEnqueueFailure(source, reason)
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&s.queueRejectLogNano)
+	if now-last < int64(time.Second) {
+		return
+	}
+	if !atomic.CompareAndSwapInt64(&s.queueRejectLogNano, last, now) {
+		return
+	}
+	wsLog("⚠️  [Queue] enqueue rejected source=%s reason=%s err=%v", source, reason, err)
 }
 
 func (s *ConnectNodeServer) Rooms(ctx context.Context, req *push.RoomsReq) (*push.RoomsReply, error) {

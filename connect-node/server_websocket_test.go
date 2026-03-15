@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,10 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/controller"
 	proto "github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
+	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type stubControllerClient struct {
@@ -486,6 +490,118 @@ func TestLeaveQueueFinalFailureClearsPendingAndAllowsReenqueue(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := attempts.Load(); got < 3 {
 		t.Fatalf("expected reenqueue to trigger new leave attempts, got %d", got)
+	}
+}
+
+func TestStopConcurrentEnqueueLeaveNoPanicAndStableStopErrors(t *testing.T) {
+	server := &ConnectNodeServer{
+		roomWorkerEnqueueTimeout: 5 * time.Millisecond,
+		leavePending:             make(map[string]struct{}),
+	}
+	server.initLeaveWorkers(1, 4)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			seq := 0
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				seq++
+				err := server.EnqueueLeave(
+					fmt.Sprintf("user-stop-%d-%d", worker, seq),
+					"room-stop",
+				)
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, ErrWorkerQueueStopping) || errors.Is(err, ErrWorkerQueueClosed) || errors.Is(err, context.DeadlineExceeded) {
+					continue
+				}
+				t.Errorf("unexpected enqueue error: %v", err)
+				return
+			}
+		}(i)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	server.Stop()
+	close(stop)
+	wg.Wait()
+
+	if err := server.EnqueueLeave("user-final", "room-final"); !errors.Is(err, ErrWorkerQueueClosed) {
+		t.Fatalf("expected ErrWorkerQueueClosed after stop, got %v", err)
+	}
+}
+
+func TestStopConcurrentBroadcastRoomNoPanicAndStableStopErrors(t *testing.T) {
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8}
+	server := &ConnectNodeServer{
+		buckets:                  []*Bucket{NewBucket(bucketCfg)},
+		bucketIdx:                1,
+		roomWorkerEnqueueTimeout: 5 * time.Millisecond,
+	}
+	server.initRoomWorkers(1, 1)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, err := server.BroadcastRoom(context.Background(), &push.BroadcastRoomReq{
+					RoomID: "room-stop",
+					Proto:  &proto.Proto{Op: 2, Seq: 1},
+				})
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, ErrWorkerQueueStopping) || errors.Is(err, ErrWorkerQueueClosed) {
+					continue
+				}
+				if status.Code(err) == codes.ResourceExhausted {
+					continue
+				}
+				t.Errorf("unexpected broadcast error: %v", err)
+				return
+			}
+		}()
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	server.Stop()
+	close(stop)
+	wg.Wait()
+
+	if _, err := server.BroadcastRoom(context.Background(), &push.BroadcastRoomReq{
+		RoomID: "room-final",
+		Proto:  &proto.Proto{Op: 2, Seq: 9},
+	}); !errors.Is(err, ErrWorkerQueueClosed) {
+		t.Fatalf("expected ErrWorkerQueueClosed after stop, got %v", err)
+	}
+}
+
+func TestEnqueueRejectReasonClassifiesQueueStates(t *testing.T) {
+	if got := enqueueRejectReason(context.DeadlineExceeded); got != "queue_full" {
+		t.Fatalf("expected queue_full for deadline, got %s", got)
+	}
+	if got := enqueueRejectReason(ErrWorkerQueueStopping); got != "stopping" {
+		t.Fatalf("expected stopping reason, got %s", got)
+	}
+	if got := enqueueRejectReason(ErrWorkerQueueClosed); got != "closed" {
+		t.Fatalf("expected closed reason, got %s", got)
 	}
 }
 
