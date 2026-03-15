@@ -60,6 +60,8 @@ so that 服务停机或灰度切换时不会触发 `send on closed channel` pani
 
 - 2026-03-13: 基于 connect-node 总体复审结果创建 backlog story，状态设为 `ready-for-dev`。
 - 2026-03-15: 完成停机 send-safe 队列状态机、stopping/closed 错误类型与拒绝分类观测，新增停机并发回归测试，状态更新为 `review`。
+- 2026-03-15: Senior Developer Review (AI) 完成；发现阻塞问题，状态由 `review` 回退为 `in-progress`。
+- 2026-03-15: 修复 review 阻塞项：`enqueueLeaveTask` 去重分支在 stopping/closed 下返回稳定错误；补充 `recordEnqueueFailure` 的 metrics 上报断言测试，状态更新回 `review`。
 
 ## Dev Agent Record
 
@@ -72,7 +74,7 @@ Codex (GPT-5) / dev-story
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test ./connect-node/...`
   - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 0.314s`
 - `GOROOT=/home/node/.local/go GOPATH=/home/node/go PATH=... go test -race ./connect-node/...`
-  - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.345s`
+  - 结果：`ok github.com/livekit/psrpc/examples/pubsub/connect-node 1.372s`
 
 ### Completion Notes List
 
@@ -81,6 +83,8 @@ Codex (GPT-5) / dev-story
 - 增加统一拒绝分类函数 `enqueueRejectReason`，区分 `queue_full`、`stopping`、`closed`；并通过 `recordCriticalEnqueueFailure` 上报 reason。
 - 为停机拒绝日志增加 1s 节流窗口，避免停机窗口日志放大。
 - 新增停机竞态回归测试：并发 `Stop()+EnqueueLeave`、并发 `Stop()+BroadcastRoom`、拒绝原因分类断言。
+- 修复 `enqueueLeaveTask` 的 pending-key 去重分支：命中去重时若队列已 `stopping/closed`，返回 `ErrWorkerQueueStopping/Closed`，不再 `nil` 吞掉拒绝语义。
+- 新增 `recordEnqueueFailure` 的 metrics 上报断言测试，验证 `queue_full/stopping/closed` 都会通过 recorder 上报对应 reason。
 - 保持 Story 3.2/3.3 语义：本地解绑先行、Leave 异步队列与有限重试流程未回退。
 
 ### File List
@@ -89,3 +93,42 @@ Codex (GPT-5) / dev-story
 - /mnt/pubsub/connect-node/server_websocket_test.go
 - /mnt/pubsub/_bmad-output/implementation-artifacts/6-1-stop-safe-queue-close-and-send-guards.md
 - /mnt/pubsub/_bmad-output/implementation-artifacts/sprint-status.yaml
+
+## Senior Developer Review (AI)
+
+### Reviewer
+
+- Yonhoo
+- Date: 2026-03-15
+- Outcome: Changes Requested (Blocked from done)
+
+### Findings
+
+1. **HIGH**: `EnqueueLeave` 在 stopping/closed 窗口仍可能返回 `nil`，违反 AC2“关闭态必须明确失败语义”  
+   - 证据：去重检查先于队列状态检查，命中 pending key 直接 `return nil`，不会返回 `ErrWorkerQueueStopping/Closed`。  
+   - 代码位置：`/mnt/pubsub/connect-node/server.go:320-330`（先返回），`/mnt/pubsub/connect-node/server.go:346-359`（状态检查在后）。  
+   - 影响：停机窗口下调用方可能把请求误判为成功，造成“静默吞掉停机拒绝”。
+
+2. **MEDIUM**: Task 3.3 标记完成但“metrics 断言”未落地，任务完成声明与实现不一致  
+   - 证据：Story 子任务写明“覆盖 stopping 态错误分类与 metrics 断言”，但新增测试仅覆盖 reason 分类函数返回值，没有断言 `recordCriticalEnqueueFailure`/metrics collector 的实际上报。  
+   - 工件位置：`/mnt/pubsub/_bmad-output/implementation-artifacts/6-1-stop-safe-queue-close-and-send-guards.md:33`  
+   - 代码位置：`/mnt/pubsub/connect-node/server_websocket_test.go:596-606`。  
+   - 影响：可观测性 AC 的回归保护不足，后续变更可能悄然破坏 reason 上报而测试不报警。
+
+3. **MEDIUM**: 工作区存在未纳入本 Story 的未提交变更，降低本次 review 可追溯性  
+   - 证据：`git status --porcelain` 显示 `_bmad-output/planning-artifacts/epics.md`、`logs/*`、`connect-node.test`、`mcp-config.json`、`package-lock.json` 等非本 Story 产物变更/新增。  
+   - 影响：在后续合并或复审时会混淆 Story 6.1 边界，不利于审计与回滚定位。
+
+### AC Validation
+
+- AC1: **Implemented**（`Stop` 与 enqueue 路径通过 `queueState + RWMutex` 协作，新增并发回归测试覆盖）。  
+- AC2: **Partial**（存在 pending-key 提前返回 `nil` 的反例）。  
+- AC3: **Partial**（实现有 reason 分类与节流日志，但缺少 metrics 上报断言测试）。  
+- AC4: **Implemented**（未见对 Story 3.2/3.3 语义的回退证据）。  
+- AC5: **Implemented**（`go test` 与 `go test -race` 已通过，且新增停机竞态测试）。
+
+### Task Audit
+
+- Task 1.2: **Partial**（存在 stopping/closed 下 `nil` 返回路径）。  
+- Task 3.3: **Not fully done**（缺 metrics 断言）。  
+- 其余已勾选任务：当前证据下可接受。
