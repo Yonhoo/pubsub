@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/etcd"
@@ -36,7 +38,6 @@ type BroadcastClient struct {
 	serverID      string
 	client        push.CometClient
 	broadcastChan chan *push.BroadcastReq
-	routineSize   uint64
 	conn          *grpc.ClientConn
 
 	ctx    context.Context
@@ -69,6 +70,9 @@ type PushManagerServer struct {
 	// 上下文控制
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// WaitGroup for WatchConnectNodes goroutine
+	watchWG sync.WaitGroup
 }
 
 // NewPushManagerServer 创建 Push-Manager 服务器
@@ -107,7 +111,9 @@ func (s *PushManagerServer) WatchConnectNodes(ctx context.Context) {
 	// 🔥 获取事件通道，监听 ETCD 事件
 	eventChan := s.discovery.GetEventChan()
 
+	s.watchWG.Add(1)
 	go func() {
+		defer s.watchWG.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -176,14 +182,20 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 		log.Printf("   目标: %s", target)
 
 		// 建立 gRPC 连接（使用 ETCD 服务发现）
-		// 🔑 添加负载均衡配置，让 ETCD Resolver 正常工作
+		// 🔑 添加负载均衡配置和 keepalive 参数
 		conn, err := grpc.DialContext(
 			ctx,
 			target,
 			grpc.WithResolvers(resolverBuilder),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(100*1024*1024)),
-			// 🔑 关键：添加负载均衡配置
+			// Keepalive 参数：防止 NAT 超时导致连接断开
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second, // 每 30s 发一次 ping
+				Timeout:             10 * time.Second, // ping 超时时间
+				PermitWithoutStream: true,             // 没有 active stream 时也发 ping
+			}),
+			// 负载均衡配置
 			grpc.WithDefaultServiceConfig(`{
 				"loadBalancingPolicy":"round_robin",
 				"healthCheckConfig": {
@@ -199,47 +211,19 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 
 		log.Printf("✅ [Push-Manager] gRPC 连接已创建: %s", nodeID)
 
-		// 启动连接状态监控
-		go func(nodeID string, conn *grpc.ClientConn) {
-			monitorCtx, monitorCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer monitorCancel()
-
-			for {
-				state := conn.GetState()
-				log.Printf("🔍 [Push-Manager] %s 连接状态: %v", nodeID, state)
-
-				if state.String() == "READY" {
-					log.Printf("✅ [Push-Manager] %s 连接已就绪", nodeID)
-					break
-				}
-
-				select {
-				case <-monitorCtx.Done():
-					log.Printf("⚠️  [Push-Manager] %s 连接超时，但仍会在后台继续尝试连接", nodeID)
-					return
-				case <-time.After(1 * time.Second):
-					// 继续等待
-				}
-			}
-		}(nodeID, conn)
-
 		client := push.NewCometClient(conn)
-		routineSize := uint64(10) // 工作协程数量
 
 		broadcastClient := &BroadcastClient{
 			serverID:      nodeID,
 			client:        client,
 			broadcastChan: make(chan *push.BroadcastReq, 1000), // 缓冲队列
-			routineSize:   routineSize,
 			conn:          conn,
 			ctx:           ctx,
 			cancel:        cancel,
 		}
 
-		// 启动工作协程处理消息
-		for i := uint64(0); i < routineSize; i++ {
-			go broadcastClient.runWorker(i)
-		}
+		// 启动单个工作协程处理消息（gRPC 内部已有 HTTP/2 多路复用）
+		go broadcastClient.runWorker(0)
 
 		comets[nodeID] = broadcastClient
 	}

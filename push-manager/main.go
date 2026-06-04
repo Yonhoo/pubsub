@@ -198,6 +198,9 @@ func main() {
 	// 取消上下文
 	cancel()
 
+	// 等待 watch goroutine 退出（确保 cleanupAllClients 完成）
+	pushManager.watchWG.Wait()
+
 	log.Println("✅ Push-Manager 已关闭")
 }
 
