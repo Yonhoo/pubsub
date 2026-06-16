@@ -17,7 +17,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	"log"
 	"sync"
 	"time"
@@ -77,13 +76,7 @@ func NewGettyWebSocketClient(addr, userID, userName, roomID string) (*GettyWebSo
 		session.SetName("pubsub-client")
 		session.SetMaxMsgLen(1024 * 1024) // 1MB
 
-		var readerPool pkg.Pool
-		var writePool pkg.Pool
-
-		readerPool.Init(10, 256)
-		writePool.Init(10, 256)
-
-		session.SetPkgHandler(gettypkg.NewProtoPackageHandler(&readerPool, &writePool))
+		session.SetPkgHandler(gettypkg.NewProtoPackageHandler())
 		session.SetEventListener(client)
 		session.SetReadTimeout(60 * time.Second)
 		session.SetWriteTimeout(60 * time.Second)

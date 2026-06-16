@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -124,9 +126,11 @@ func registerIntegrationHandler(t *testing.T, server *ConnectNodeServer, userID 
 	h := &ProtoMessageHandler{
 		server:              server,
 		channel:             NewChannel(32, 32),
-		protoPackageHandler: gettypkg.NewProtoPackageHandler(nil, nil),
+		protoPackageHandler: gettypkg.NewProtoPackageHandler(),
 		writeSessionID:      sessionID,
 	}
+	// Note: In tests, Key is set directly. In production, SetKeyIP is called with roomId:userId composite key.
+	// Tests that need the composite key should manually update it after setting handler.roomId.
 	h.channel.Key = userID
 	session := &mockGettySession{record: true}
 	if err := server.sharedWriter.Register(sessionID, session, h.protoPackageHandler, h); err != nil {
@@ -212,8 +216,9 @@ func TestIntegrationJoinSyncConfirmationWithBufconnController(t *testing.T) {
 	waitEventually(t, time.Second, func() bool {
 		return len(session.writeBatches()) >= 1
 	}, "expected ack write after join confirmation")
-	if h.channel.Room == nil || h.channel.Room.ID != "room-it" {
-		t.Fatalf("expected room-it binding after join, got %#v", h.channel.Room)
+	room := h.channel.Room.Load()
+	if room == nil || room.ID != "room-it" {
+		t.Fatalf("expected room-it binding after join, got %#v", room)
 	}
 	if !h.channel.NeedPush(2) {
 		t.Fatal("expected join path to watch op=2")
@@ -240,13 +245,15 @@ func TestIntegrationLeaveAsyncUnbindAndRetry(t *testing.T) {
 	}()
 
 	bucket := server.buckets[0]
-	if err := bucket.Put("room-leave", h.channel); err != nil {
-		t.Fatalf("bucket put failed: %v", err)
-	}
 	h.bucket = bucket
 	h.auth = true
 	h.roomId = "room-leave"
 	h.clientId = "leave-user"
+	// Update channel.Key to use composite key (roomId:userId) to match production behavior
+	h.channel.Key = "room-leave:leave-user"
+	if err := bucket.Put("room-leave", h.channel); err != nil {
+		t.Fatalf("bucket put failed: %v", err)
+	}
 
 	start := time.Now()
 	h.cleanupUser()
@@ -256,8 +263,8 @@ func TestIntegrationLeaveAsyncUnbindAndRetry(t *testing.T) {
 	if got := bucket.ChannelCount(); got != 0 {
 		t.Fatalf("expected local bucket detach before leave rpc completion, got %d", got)
 	}
-	if h.channel.Room != nil {
-		t.Fatalf("expected local room cleared, got %#v", h.channel.Room)
+	if room := h.channel.Room.Load(); room != nil {
+		t.Fatalf("expected local room cleared, got %#v", room)
 	}
 
 	waitEventually(t, time.Second, func() bool {
@@ -303,9 +310,9 @@ func TestIntegrationBroadcastRoomOpFiltering(t *testing.T) {
 	}
 
 	var matched, wrongOp, wrongRoom int32
-	_ = newPushChannel("match", "room-a", 2, &matched)
-	_ = newPushChannel("wrong-op", "room-a", 3, &wrongOp)
-	_ = newPushChannel("wrong-room", "room-b", 2, &wrongRoom)
+	_ = newPushChannel("room-a:match", "room-a", 2, &matched)
+	_ = newPushChannel("room-a:wrong-op", "room-a", 3, &wrongOp)
+	_ = newPushChannel("room-b:wrong-room", "room-b", 2, &wrongRoom)
 
 	_, err := server.Broadcast(context.Background(), &push.BroadcastReq{
 		ProtoOp: 2,
@@ -376,4 +383,154 @@ func TestIntegrationQueueStateErrorStatusCodeCompatibility(t *testing.T) {
 	if st.Code() != codes.Unavailable {
 		t.Fatalf("expected unavailable status code, got %s", st.Code())
 	}
+}
+
+func startRealConnectNodeGRPC(t *testing.T, server *ConnectNodeServer) (push.CometClient, string, func()) {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen real connect-node grpc: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	push.RegisterCometServer(grpcServer, server)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = grpcServer.Serve(lis)
+	}()
+
+	conn, err := grpc.Dial(
+		lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial real connect-node grpc: %v", err)
+	}
+
+	cleanup := func() {
+		_ = conn.Close()
+		grpcServer.Stop()
+		_ = lis.Close()
+		<-done
+	}
+	return push.NewCometClient(conn), lis.Addr().String(), cleanup
+}
+
+func countWrittenPackages(session *mockGettySession) int {
+	total := 0
+	for _, batch := range session.writeBatches() {
+		total += len(batch)
+	}
+	return total
+}
+
+func waitForRealRoomClients(t *testing.T, sessions []*mockGettySession, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		allReceived := true
+		for _, session := range sessions {
+			if countWrittenPackages(session) < want {
+				allReceived = false
+				break
+			}
+		}
+		if allReceived {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	minCount := int(^uint(0) >> 1)
+	maxCount := 0
+	for _, session := range sessions {
+		count := countWrittenPackages(session)
+		if count < minCount {
+			minCount = count
+		}
+		if count > maxCount {
+			maxCount = count
+		}
+	}
+	t.Fatalf("expected every real room client to receive %d packages, min=%d max=%d", want, minCount, maxCount)
+}
+
+func TestIntegrationRealConnectNodeRoomBroadcastThreeNodesHundredClients(t *testing.T) {
+	const (
+		connectNodeCount = 3
+		clientCount      = 100
+		messageCount     = 100
+		roomID           = "room-real-chain"
+	)
+
+	servers := make([]*ConnectNodeServer, 0, connectNodeCount)
+	clients := make([]push.CometClient, 0, connectNodeCount)
+	cleanups := make([]func(), 0, connectNodeCount)
+	for i := 0; i < connectNodeCount; i++ {
+		server := newIntegrationServer(nil)
+		server.nodeID = fmt.Sprintf("real-connect-node-%d", i+1)
+		client, endpoint, cleanup := startRealConnectNodeGRPC(t, server)
+		t.Logf("[e2e] real connect-node started node=%s endpoint=%s roomWorkers=%d buckets=%d",
+			server.nodeID, endpoint, server.roomWorkerNum, len(server.buckets))
+		servers = append(servers, server)
+		clients = append(clients, client)
+		cleanups = append(cleanups, cleanup)
+	}
+	defer func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+		for _, server := range servers {
+			server.Stop()
+		}
+	}()
+
+	sessions := make([]*mockGettySession, 0, clientCount)
+	for i := 0; i < clientCount; i++ {
+		server := servers[i%connectNodeCount]
+		userID := fmt.Sprintf("real-client-%03d", i+1)
+		handler, session := registerIntegrationHandler(t, server, userID)
+		handler.channel.Watch(2)
+		handler.bucket = server.buckets[0]
+		handler.roomId = roomID
+		handler.clientId = userID
+		// Update channel.Key to use composite key (roomId:userId) to match production behavior
+		handler.channel.Key = roomID + ":" + userID
+		handler.auth = true
+		if err := handler.bucket.Put(roomID, handler.channel); err != nil {
+			t.Fatalf("put real client into room: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = server.sharedWriter.Unregister(handler.writeSessionID)
+		})
+		sessions = append(sessions, session)
+	}
+	t.Logf("[e2e] joined %d real clients into room=%s across %d connect-nodes", clientCount, roomID, connectNodeCount)
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+	for i := 0; i < messageCount; i++ {
+		<-ticker.C
+		req := &push.BroadcastRoomReq{
+			RoomID: roomID,
+			Proto: &proto.Proto{
+				Op:     2,
+				Seq:    int32(i + 1),
+				Roomid: roomID,
+			},
+		}
+		for nodeIdx, client := range clients {
+			if _, err := client.BroadcastRoom(context.Background(), req); err != nil {
+				t.Fatalf("broadcast seq=%d to connect-node-%d: %v", i+1, nodeIdx+1, err)
+			}
+		}
+	}
+	t.Logf("[e2e] sent %d room messages to %d real connect-nodes in %v", messageCount, connectNodeCount, time.Since(start))
+
+	waitForRealRoomClients(t, sessions, messageCount)
+	t.Logf("[e2e] verified room=%s: all %d real clients received %d messages", roomID, clientCount, messageCount)
 }

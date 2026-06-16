@@ -57,13 +57,13 @@ func NewDatabase(config *Config) (*gorm.DB, error) {
 		config.Charset,
 	)
 
-	// 配置详细的日志记录器，记录所有 SQL 语句和错误
+	// 只记录慢查询和错误，不打印每条 SQL（避免日志洪泛）
 	customLogger := logger.New(
 		log.New(log.Writer(), "\r\n", log.LstdFlags),
 		logger.Config{
 			SlowThreshold:             time.Second,
-			LogLevel:                  logger.Info,
-			IgnoreRecordNotFoundError: false,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
 			Colorful:                  false,
 		},
 	)
@@ -93,8 +93,6 @@ func NewDatabase(config *Config) (*gorm.DB, error) {
 
 // AutoMigrate 自动迁移表结构
 func AutoMigrate(db *gorm.DB) error {
-	log.Println("📦 [Database] 开始自动迁移...")
-
 	err := db.AutoMigrate(
 		&Room{},
 		&RoomUser{},
@@ -103,8 +101,6 @@ func AutoMigrate(db *gorm.DB) error {
 	if err != nil {
 		return fmt.Errorf("auto migrate failed: %w", err)
 	}
-
-	log.Println("✅ [Database] 表结构迁移完成")
 	return nil
 }
 
@@ -134,7 +130,6 @@ func CreateDatabaseIfNotExists(config *Config) error {
 		return fmt.Errorf("failed to create database: %w", err)
 	}
 
-	log.Printf("✅ [Database] 数据库 '%s' 已就绪\n", config.DBName)
 	return nil
 }
 

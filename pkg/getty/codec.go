@@ -4,28 +4,49 @@ import (
 	"encoding/binary"
 	"errors"
 	getty "github.com/AlexStocks/getty/transport"
-	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"log"
+	"sync"
 )
 
 var (
 	ErrNotEnoughStream = errors.New("not enough stream")
 )
 
-// ProtoWithBuffer 绑定 Proto 和它使用的 Buffer
-// 使用完后需要调用 Release() 归还 Buffer
-type ProtoWithBuffer struct {
-	Proto  *protocol.Proto
-	Buffer *pkg.Buffer
-	pool   *pkg.LockFreePool
+// readBufferSize 是 read buffer 的固定大小（4KB）。
+// 如果消息超过这个大小，buffer 会按需重新分配（不放回池）。
+const readBufferSize = 4096
+
+// readBufferPool 是 server-level 共享的 read buffer 池。
+//
+// 设计说明：
+// - 跨连接共享：所有 Read 操作从同一个池获取 buffer，per-P 缓存几乎无锁。
+// - GC 友好：runtime 自动管理生命周期，空闲时回收，繁忙时保留。
+// - 替代 LockFreePool：原 LockFreePool 在 Read/Release 跨 goroutine 调用下有 race。
+var readBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, readBufferSize)
+		return &buf
+	},
 }
 
-// Release 归还 Buffer 到池中
+// ProtoWithBuffer 绑定 Proto 和它使用的 Buffer。
+// 使用完后必须调用 Release() 归还 buffer 到池。
+type ProtoWithBuffer struct {
+	Proto *protocol.Proto
+	buf   *[]byte // 指向 sync.Pool 中的 buffer，Release 时归还
+}
+
+// Release 归还 Buffer 到 server-level 池。
+// 多次调用安全（buf 设为 nil 后第二次调用是 noop）。
 func (p *ProtoWithBuffer) Release() {
-	if p.Buffer != nil && p.pool != nil {
-		p.pool.Put(p.Buffer)
-		p.Buffer = nil
+	if p.buf != nil {
+		readBufferPool.Put(p.buf)
+		p.buf = nil
+		// 切断 Proto.Body 对池中 buffer 的引用，避免使用方持续访问已归还内存
+		if p.Proto != nil {
+			p.Proto.Body = nil
+		}
 	}
 }
 
@@ -47,45 +68,27 @@ const (
 	_seqOffset    = _opOffset + _opSize
 )
 
-// ProtoPackageHandler 处理 protocol.Proto 的 PackageHandler
-// 设计说明（零拷贝 + Buffer Pool 优化）：
-// - Read: 每次从连接级别的无锁 Pool 获取 Buffer，Proto.Body 直接引用 buffer 内存
-// - Write: 直接分配目标大小的 []byte 并写入，避免额外拷贝
-// - 使用完 Proto 后，调用 ProtoWithBuffer.Release() 归还 Buffer 到池中
-type ProtoPackageHandler struct {
-	BufferPool *pkg.LockFreePool // 连接级别的无锁 Buffer Pool（4KB 固定大小）
+// ProtoPackageHandler 处理 protocol.Proto 的 PackageHandler。
+// Buffer 通过 server-level sync.Pool 管理（readBufferPool）。
+type ProtoPackageHandler struct{}
+
+// NewProtoPackageHandler 创建新的 ProtoPackageHandler。
+// Buffer 通过 server-level sync.Pool（readBufferPool）管理，所有连接共享。
+func NewProtoPackageHandler() *ProtoPackageHandler {
+	return &ProtoPackageHandler{}
 }
 
-// NewProtoPackageHandler 创建新的 ProtoPackageHandler
-// 基于连接的无锁 Buffer Pool（初始 8 个 Buffer，每个 4KB）
-func NewProtoPackageHandler(readPool, writePool *pkg.Pool) *ProtoPackageHandler {
-	const (
-		initialBuffers = 8    // 初始 Buffer 数量
-		bufferSize     = 4096 // 每个 Buffer 大小：4KB
-	)
+// Close 清理资源（无需操作，buffer 池由 runtime GC 管理）。
+func (h *ProtoPackageHandler) Close() {}
 
-	return &ProtoPackageHandler{
-		BufferPool: pkg.NewLockFreePool(initialBuffers, bufferSize),
-	}
-}
-
-// Close 清理资源（无需操作，Pool 会被 GC 回收）
-func (h *ProtoPackageHandler) Close() {
-	// 连接级别的 Pool，连接关闭后会被 GC 回收
-}
-
-// Read 从 data []byte 中解析 protocol.Proto（零拷贝 + Buffer Pool）
+// Read 从 data []byte 中解析 protocol.Proto（零拷贝 + sync.Pool）。
+//
 // 协议格式：[packLen(4)] [headerLen(2)] [Ver(2)] [Op(4)] [Seq(4)] [RoomIdLen(2)] [RoomId(...)] [UserIdLen(2)] [UserId(...)] [Body(...)]
 //
-// 优化说明：
-// 1. 每次 Read 从连接级别的无锁 Pool 获取 Buffer（4KB）
-// 2. Proto.Body 零拷贝引用 Buffer 内存
-// 3. 返回 ProtoWithBuffer，使用完后调用 Release() 归还 Buffer
-//
-// 使用方式：
-// 1. Read 解析后将 ProtoWithBuffer 放入 Ring Buffer
-// 2. dispatchWebsocket 从 Ring Buffer 取出并处理
-// 3. 处理完后调用 ProtoWithBuffer.Release() 归还 Buffer
+// Buffer 生命周期：
+// 1. 从 server-level readBufferPool 取一块 buffer（per-P 缓存命中几乎无锁）。
+// 2. Proto.Body 零拷贝引用 buffer 内存。
+// 3. 调用方处理完后必须调用 ProtoWithBuffer.Release() 归还 buffer。
 func (h *ProtoPackageHandler) Read(ss getty.Session, data []byte) (any, int, error) {
 
 	var (
@@ -106,9 +109,14 @@ func (h *ProtoPackageHandler) Read(ss getty.Session, data []byte) (any, int, err
 		return nil, 0, ErrNotEnoughStream
 	}
 
-	// 从连接级别的无锁 Pool 获取 Buffer
-	buf := h.BufferPool.Get()
-	bufBytes := buf.Bytes()
+	// 从 server-level sync.Pool 获取 buffer（per-P 本地缓存，几乎无锁）
+	bufp := readBufferPool.Get().(*[]byte)
+	bufBytes := *bufp
+
+	// 释放路径：解析失败时归还 buffer，避免泄漏
+	releaseOnError := func() {
+		readBufferPool.Put(bufp)
+	}
 
 	// 将数据复制到 buffer
 	copy(bufBytes, data)
@@ -118,22 +126,31 @@ func (h *ProtoPackageHandler) Read(ss getty.Session, data []byte) (any, int, err
 
 	// 检查 packLen 是否合理
 	if packLen < 0 || packLen > _maxPackSize {
+		releaseOnError()
 		return nil, 0, protocol.ErrProtoPackLen
 	}
 
 	// 检查是否有足够的数据
 	if len(data) < int(packLen) {
+		releaseOnError()
 		return nil, 0, ErrNotEnoughStream
 	}
 
-	// 确保 buffer 中有完整的数据
+	// 如果 buffer 太小，按需扩容（不放回池，避免污染池中固定大小的 buffer）
 	if len(bufBytes) < int(packLen) {
-		copy(bufBytes, data[:packLen])
+		newBuf := make([]byte, packLen)
+		copy(newBuf, data[:packLen])
+		// 旧 buffer 归还到池
+		readBufferPool.Put(bufp)
+		bufBytes = newBuf
+		// 临时容器：超大 buffer 不放回池（Release 时丢弃即可）
+		bufp = &newBuf
 	}
 
 	// 读取 headerLen（header 长度，2字节，大端序）
 	headerLen = int16(binary.BigEndian.Uint16(bufBytes[_headerOffset:_verOffset]))
 	if headerLen != _rawHeaderSize {
+		readBufferPool.Put(bufp)
 		return nil, 0, protocol.ErrProtoHeaderLen
 	}
 
@@ -149,12 +166,14 @@ func (h *ProtoPackageHandler) Read(ss getty.Session, data []byte) (any, int, err
 	// 读取 RoomId（2字节长度 + UTF-8 数据）
 	roomIdOffset = _seqOffset + _seqSize
 	if len(bufBytes) < roomIdOffset+_stringLenSize {
+		readBufferPool.Put(bufp)
 		return nil, 0, ErrNotEnoughStream
 	}
 	roomIdLen = int16(binary.BigEndian.Uint16(bufBytes[roomIdOffset : roomIdOffset+_stringLenSize]))
 	if roomIdLen > 0 {
 		roomIdDataOffset := roomIdOffset + _stringLenSize
 		if len(bufBytes) < roomIdDataOffset+int(roomIdLen) {
+			readBufferPool.Put(bufp)
 			return nil, 0, ErrNotEnoughStream
 		}
 		// string 会自动拷贝（Go 的 string 转换机制）
@@ -166,12 +185,14 @@ func (h *ProtoPackageHandler) Read(ss getty.Session, data []byte) (any, int, err
 	// 读取 UserId（2字节长度 + UTF-8 数据）
 	userIdOffset = roomIdOffset + _stringLenSize + int(roomIdLen)
 	if len(bufBytes) < userIdOffset+_stringLenSize {
+		readBufferPool.Put(bufp)
 		return nil, 0, ErrNotEnoughStream
 	}
 	userIdLen = int16(binary.BigEndian.Uint16(bufBytes[userIdOffset : userIdOffset+_stringLenSize]))
 	if userIdLen > 0 {
 		userIdDataOffset := userIdOffset + _stringLenSize
 		if len(bufBytes) < userIdDataOffset+int(userIdLen) {
+			readBufferPool.Put(bufp)
 			return nil, 0, ErrNotEnoughStream
 		}
 		// string 会自动拷贝（Go 的 string 转换机制）
@@ -195,9 +216,8 @@ func (h *ProtoPackageHandler) Read(ss getty.Session, data []byte) (any, int, err
 
 	// 返回 ProtoWithBuffer（绑定 Proto 和 Buffer）
 	return &ProtoWithBuffer{
-		Proto:  &pkg,
-		Buffer: buf,
-		pool:   h.BufferPool,
+		Proto: &pkg,
+		buf:   bufp,
 	}, readLen, nil
 }
 

@@ -99,16 +99,14 @@ func NewPushManagerServer(
 	return pms
 }
 
-// WatchConnectNodes 🔥 监听 Connect-Node 服务发现事件（事件驱动）
+// WatchConnectNodes 监听 Connect-Node 服务发现事件（事件驱动）
 func (s *PushManagerServer) WatchConnectNodes(ctx context.Context) {
-	log.Printf("🔍 [Push-Manager] 开始监听 Connect-Node 事件...\n")
-
 	// 首先获取已有的节点
 	instances, _ := s.discovery.GetEndpoints()
 
 	s.createBroadcastClient(instances)
 
-	// 🔥 获取事件通道，监听 ETCD 事件
+	// 获取事件通道，监听 ETCD 事件
 	eventChan := s.discovery.GetEventChan()
 
 	s.watchWG.Add(1)
@@ -117,30 +115,25 @@ func (s *PushManagerServer) WatchConnectNodes(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("⚠️  [Push-Manager] 停止监听 Connect-Node 事件\n")
 				s.cleanupAllClients()
 				return
 
-			case event, ok := <-eventChan:
+			case _, ok := <-eventChan:
 				if !ok {
 					// 事件通道已关闭
 					return
 				}
-				log.Printf("etcd discovery clients %s", event)
 
 				endpoints, err := s.discovery.GetEndpoints()
-
 				if err != nil {
-					log.Printf("get endpoints error ")
+					log.Printf("[Push-Manager] 获取 endpoints 失败: %v", err)
 					continue
 				}
 
 				s.createBroadcastClient(endpoints)
-
 			}
 		}
 	}()
-
 }
 
 // createBroadcastClient 为指定的 Connect-Node 创建广播客户端
@@ -159,57 +152,35 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 
 		// 如果已存在，跳过
 		if _, exists := comets[nodeID]; exists {
-			log.Printf("✅ [Push-Manager] Connect-Node 客户端已存在: %s (%s)\n", nodeID, instance)
 			continue
 		}
-
-		log.Printf("🔗 [Push-Manager] 创建 Connect-Node 客户端: %s (%s)\n", nodeID, instance)
 
 		ctx, cancel := context.WithCancel(s.ctx)
 
-		// 🔑 改为使用 ETCD Resolver 连接（而不是直连）
-		log.Printf("🔍 [Push-Manager] 通过 ETCD 连接 Connect-Node: %s", nodeID)
+		// 直连特定 connect-node：每个 BroadcastClient 与一个 node 一对一。
+		// 不能用 "etcd:///connect-node" + round_robin，那样每个 client 都连到 LB 池，
+		// 导致 EnqueueBroadcastMsg 循环 N 个 client 时实际是 N 次独立 round_robin
+		// 选择，单条广播会随机漏掉某些 node 上的用户。
+		target := instance
 
-		resolverBuilder, err := etcd.GetETCDResolverBuilder(s.etcdEndpoints)
-		if err != nil {
-			log.Printf("❌ [Push-Manager] 获取 ETCD Resolver 失败: %v\n", err)
-			cancel()
-			continue
-		}
-
-		// 🔑 关键：target 格式必须是 "etcd:///服务名"（服务名不带开头斜杠）
-		target := "etcd:///connect-node"
-		log.Printf("   目标: %s", target)
-
-		// 建立 gRPC 连接（使用 ETCD 服务发现）
-		// 🔑 添加负载均衡配置和 keepalive 参数
+		// 建立 gRPC 连接（直连，不走服务发现 LB）
 		conn, err := grpc.DialContext(
 			ctx,
 			target,
-			grpc.WithResolvers(resolverBuilder),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(100*1024*1024)),
 			// Keepalive 参数：防止 NAT 超时导致连接断开
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                30 * time.Second, // 每 30s 发一次 ping
-				Timeout:             10 * time.Second, // ping 超时时间
-				PermitWithoutStream: true,             // 没有 active stream 时也发 ping
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
 			}),
-			// 负载均衡配置
-			grpc.WithDefaultServiceConfig(`{
-				"loadBalancingPolicy":"round_robin",
-				"healthCheckConfig": {
-					"serviceName": "connect-node"
-				}
-			}`),
 		)
 		if err != nil {
-			log.Printf("❌ [Push-Manager] 连接到 %s 失败: %v\n", target, err)
+			log.Printf("[Push-Manager] 连接到 %s 失败: %v", target, err)
 			cancel()
 			continue
 		}
-
-		log.Printf("✅ [Push-Manager] gRPC 连接已创建: %s", nodeID)
 
 		client := push.NewCometClient(conn)
 
@@ -230,18 +201,10 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 
 	// 更新客户端映射
 	s.broadCastClientMap = comets
-
-	log.Printf("✅ [Push-Manager] Connect-Node 客户端创建成功，共 %d 个节点\n", len(comets))
 }
 
 // runWorker 工作协程：从队列中取出消息并发送
 func (bc *BroadcastClient) runWorker(workerID uint64) {
-	log.Printf("👷 [Worker-%s-%d] 已启动\n", bc.serverID, workerID)
-
-	defer func() {
-		log.Printf("👷 [Worker-%s-%d] 已停止\n", bc.serverID, workerID)
-	}()
-
 	for {
 		select {
 		case <-bc.ctx.Done():
@@ -252,7 +215,7 @@ func (bc *BroadcastClient) runWorker(workerID uint64) {
 				return
 			}
 			// 发送消息到 Connect-Node
-			// 🔑 使用 WaitForReady 避免连接未就绪时调用失败
+			// 使用 WaitForReady 避免连接未就绪时调用失败
 			ctx, cancel := context.WithTimeout(bc.ctx, 10*time.Second)
 
 			startTime := time.Now()
@@ -261,7 +224,7 @@ func (bc *BroadcastClient) runWorker(workerID uint64) {
 			cancel() // 释放资源
 
 			if err != nil {
-				log.Printf("❌ [Worker-%s-%d] 推送消息失败 (耗时: %v): %v\n", bc.serverID, workerID, elapsed, err)
+				log.Printf("[Worker-%s-%d] 推送消息失败 (耗时: %v): %v", bc.serverID, workerID, elapsed, err)
 			}
 		}
 	}
@@ -292,20 +255,17 @@ func (s *PushManagerServer) GetQueueFullDropCount() int64 {
 
 // Close 关闭客户端
 func (bc *BroadcastClient) Close() {
-	log.Printf("🔌 [Push-Manager] 关闭客户端: %s\n", bc.serverID)
 	bc.cancel()
 	close(bc.broadcastChan)
 
 	if bc.conn != nil {
 		bc.conn.Close()
 	}
-	log.Printf("✅ [Push-Manager] 客户端已关闭: %s\n", bc.serverID)
 }
 
 // cleanupAllClients 清理所有客户端
 func (s *PushManagerServer) cleanupAllClients() {
-	for nodeID, client := range s.broadCastClientMap {
-		log.Printf("🧹 [Push-Manager] 清理客户端: %s\n", nodeID)
+	for _, client := range s.broadCastClientMap {
 		client.Close()
 	}
 	s.broadCastClientMap = make(map[string]*BroadcastClient)
@@ -321,5 +281,22 @@ func (s *PushManagerServer) Broadcast(ctx context.Context, req *broadcast.BroadC
 		Code: "0",
 		Msg:  "OK",
 		Desc: "消息已加入推送队列",
+	}, nil
+}
+
+// BroadcastToRoom 实现 PushServer 的 BroadcastToRoom 方法（向特定房间广播）
+func (s *PushManagerServer) BroadcastToRoom(ctx context.Context, req *broadcast.BroadCastRoomReq) (*broadcast.BroadCastRoomReply, error) {
+	// 将 BroadCastRoomReq 转换为 BroadCastReq
+	// 注意：Proto 中已经包含了 RoomID 字段，所以直接使用
+	broadcastReq := &broadcast.BroadCastReq{
+		Proto: req.Proto,
+	}
+
+	s.EnqueueBroadcastMsg(broadcastReq)
+
+	return &broadcast.BroadCastRoomReply{
+		Code: "0",
+		Msg:  "OK",
+		Desc: fmt.Sprintf("消息已加入推送队列（房间: %s）", req.RoomId),
 	}, nil
 }

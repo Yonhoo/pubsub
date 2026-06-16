@@ -72,11 +72,12 @@ func (c *PushManagerClient) BroadcastToRoom(roomID, message string) error {
 		Body:   []byte(message),
 	}
 
-	req := &broadcast.BroadCastReq{
-		Proto: protoMsg,
+	req := &broadcast.BroadCastRoomReq{
+		RoomId: roomID,
+		Proto:  protoMsg,
 	}
 
-	resp, err := c.client.Broadcast(ctx, req)
+	resp, err := c.client.BroadcastToRoom(ctx, req)
 	if err != nil {
 		return fmt.Errorf("广播失败: %w", err)
 	}
@@ -107,4 +108,3 @@ func (c *PushManagerClient) Close() error {
 	log.Printf("👋 关闭 gRPC 连接")
 	return c.conn.Close()
 }
-

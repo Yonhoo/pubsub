@@ -25,7 +25,6 @@ import (
 	"time"
 
 	getty "github.com/AlexStocks/getty/transport"
-	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	gettypkg "github.com/livekit/psrpc/examples/pubsub/pkg/getty"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 )
@@ -73,6 +72,7 @@ func main() {
 	hbMs := flag.Int("hb", 30000, "heartbeat interval (milliseconds)")
 	logFile := flag.String("log", "client.log", "log file path (default client.log)")
 	statFile := flag.String("stat", "stat.log", "statistics log file path (default stat.log)")
+	userPrefix := flag.String("prefix", "user", "user id prefix")
 	flag.Parse()
 
 	// 设置日志输出（同时影响标准 log 和 Getty 库的日志）
@@ -128,7 +128,7 @@ func main() {
 
 	// 启动多个用户连接
 	for i := 0; i < *users; i++ {
-		uid := fmt.Sprintf("user-%06d", i+1)
+		uid := fmt.Sprintf("%s-%06d", *userPrefix, i+1)
 		go startClient(*wsBase, *roomID, uid, uid, &countDown, &aliveCount, *hbMs)
 		// 避免同时创建太多连接，稍微错开
 		if i%100 == 0 && i > 0 {
@@ -189,14 +189,8 @@ func startClient(wsBase, roomID, userID, userName string, countDown, aliveCount 
 		session.SetName(fmt.Sprintf("bench-client-%s", userID))
 		session.SetMaxMsgLen(1024 * 1024) // 1MB
 
-		// 初始化 buffer pool
-		var readerPool pkg.Pool
-		var writePool pkg.Pool
-		readerPool.Init(10, 256)
-		writePool.Init(10, 256)
-
-		// 设置 ProtoPackageHandler（处理协议编解码）
-		session.SetPkgHandler(gettypkg.NewProtoPackageHandler(&readerPool, &writePool))
+		// 设置 ProtoPackageHandler（处理协议编解码，buffer 通过 server-level sync.Pool 管理）
+		session.SetPkgHandler(gettypkg.NewProtoPackageHandler())
 		session.SetEventListener(client)
 		session.SetReadTimeout(60 * time.Second)
 		session.SetWriteTimeout(60 * time.Second)

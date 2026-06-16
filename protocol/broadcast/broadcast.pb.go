@@ -126,6 +126,120 @@ func (x *BroadCastReply) GetDesc() string {
 	return ""
 }
 
+// 房间广播请求
+type BroadCastRoomReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RoomId        string                 `protobuf:"bytes,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
+	Proto         *protocol.Proto        `protobuf:"bytes,2,opt,name=proto,proto3" json:"proto,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BroadCastRoomReq) Reset() {
+	*x = BroadCastRoomReq{}
+	mi := &file_broadcast_broadcast_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BroadCastRoomReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BroadCastRoomReq) ProtoMessage() {}
+
+func (x *BroadCastRoomReq) ProtoReflect() protoreflect.Message {
+	mi := &file_broadcast_broadcast_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BroadCastRoomReq.ProtoReflect.Descriptor instead.
+func (*BroadCastRoomReq) Descriptor() ([]byte, []int) {
+	return file_broadcast_broadcast_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *BroadCastRoomReq) GetRoomId() string {
+	if x != nil {
+		return x.RoomId
+	}
+	return ""
+}
+
+func (x *BroadCastRoomReq) GetProto() *protocol.Proto {
+	if x != nil {
+		return x.Proto
+	}
+	return nil
+}
+
+// 房间广播响应
+type BroadCastRoomReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	Msg           string                 `protobuf:"bytes,2,opt,name=msg,proto3" json:"msg,omitempty"`
+	Desc          string                 `protobuf:"bytes,3,opt,name=desc,proto3" json:"desc,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BroadCastRoomReply) Reset() {
+	*x = BroadCastRoomReply{}
+	mi := &file_broadcast_broadcast_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BroadCastRoomReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BroadCastRoomReply) ProtoMessage() {}
+
+func (x *BroadCastRoomReply) ProtoReflect() protoreflect.Message {
+	mi := &file_broadcast_broadcast_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BroadCastRoomReply.ProtoReflect.Descriptor instead.
+func (*BroadCastRoomReply) Descriptor() ([]byte, []int) {
+	return file_broadcast_broadcast_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *BroadCastRoomReply) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *BroadCastRoomReply) GetMsg() string {
+	if x != nil {
+		return x.Msg
+	}
+	return ""
+}
+
+func (x *BroadCastRoomReply) GetDesc() string {
+	if x != nil {
+		return x.Desc
+	}
+	return ""
+}
+
 var File_broadcast_broadcast_proto protoreflect.FileDescriptor
 
 const file_broadcast_broadcast_proto_rawDesc = "" +
@@ -136,10 +250,18 @@ const file_broadcast_broadcast_proto_rawDesc = "" +
 	"\x0eBroadCastReply\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x12\n" +
-	"\x04desc\x18\x03 \x01(\tR\x04desc2K\n" +
+	"\x04desc\x18\x03 \x01(\tR\x04desc\"R\n" +
+	"\x10BroadCastRoomReq\x12\x17\n" +
+	"\aroom_id\x18\x01 \x01(\tR\x06roomId\x12%\n" +
+	"\x05proto\x18\x02 \x01(\v2\x0f.protocol.ProtoR\x05proto\"N\n" +
+	"\x12BroadCastRoomReply\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\x12\x10\n" +
+	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x12\n" +
+	"\x04desc\x18\x03 \x01(\tR\x04desc2\x98\x01\n" +
 	"\n" +
 	"PushServer\x12=\n" +
-	"\tBroadcast\x12\x16.protocol.BroadCastReq\x1a\x18.protocol.BroadCastReplyBGZEgithub.com/livekit/psrpc/examples/pubsub/protocol/broadcast;broadcastb\x06proto3"
+	"\tBroadcast\x12\x16.protocol.BroadCastReq\x1a\x18.protocol.BroadCastReply\x12K\n" +
+	"\x0fBroadcastToRoom\x12\x1a.protocol.BroadCastRoomReq\x1a\x1c.protocol.BroadCastRoomReplyBGZEgithub.com/livekit/psrpc/examples/pubsub/protocol/broadcast;broadcastb\x06proto3"
 
 var (
 	file_broadcast_broadcast_proto_rawDescOnce sync.Once
@@ -153,21 +275,26 @@ func file_broadcast_broadcast_proto_rawDescGZIP() []byte {
 	return file_broadcast_broadcast_proto_rawDescData
 }
 
-var file_broadcast_broadcast_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_broadcast_broadcast_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_broadcast_broadcast_proto_goTypes = []any{
-	(*BroadCastReq)(nil),   // 0: protocol.BroadCastReq
-	(*BroadCastReply)(nil), // 1: protocol.BroadCastReply
-	(*protocol.Proto)(nil), // 2: protocol.Proto
+	(*BroadCastReq)(nil),       // 0: protocol.BroadCastReq
+	(*BroadCastReply)(nil),     // 1: protocol.BroadCastReply
+	(*BroadCastRoomReq)(nil),   // 2: protocol.BroadCastRoomReq
+	(*BroadCastRoomReply)(nil), // 3: protocol.BroadCastRoomReply
+	(*protocol.Proto)(nil),     // 4: protocol.Proto
 }
 var file_broadcast_broadcast_proto_depIdxs = []int32{
-	2, // 0: protocol.BroadCastReq.proto:type_name -> protocol.Proto
-	0, // 1: protocol.PushServer.Broadcast:input_type -> protocol.BroadCastReq
-	1, // 2: protocol.PushServer.Broadcast:output_type -> protocol.BroadCastReply
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	4, // 0: protocol.BroadCastReq.proto:type_name -> protocol.Proto
+	4, // 1: protocol.BroadCastRoomReq.proto:type_name -> protocol.Proto
+	0, // 2: protocol.PushServer.Broadcast:input_type -> protocol.BroadCastReq
+	2, // 3: protocol.PushServer.BroadcastToRoom:input_type -> protocol.BroadCastRoomReq
+	1, // 4: protocol.PushServer.Broadcast:output_type -> protocol.BroadCastReply
+	3, // 5: protocol.PushServer.BroadcastToRoom:output_type -> protocol.BroadCastRoomReply
+	4, // [4:6] is the sub-list for method output_type
+	2, // [2:4] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_broadcast_broadcast_proto_init() }
@@ -181,7 +308,7 @@ func file_broadcast_broadcast_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_broadcast_broadcast_proto_rawDesc), len(file_broadcast_broadcast_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

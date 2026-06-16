@@ -120,7 +120,7 @@ func newRegisteredFlushShardWithSession(batchSize, maxBatchBytes int, flushInter
 		kind:      writeEventRegister,
 		sessionID: sessionID,
 		session:   session,
-		handler:   gettypkg.NewProtoPackageHandler(nil, nil),
+		handler:   gettypkg.NewProtoPackageHandler(),
 		owner:     owner,
 	})
 	return shard, sessionID, owner, session

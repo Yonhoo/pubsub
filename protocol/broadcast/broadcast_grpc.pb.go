@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PushServer_Broadcast_FullMethodName = "/protocol.PushServer/Broadcast"
+	PushServer_Broadcast_FullMethodName       = "/protocol.PushServer/Broadcast"
+	PushServer_BroadcastToRoom_FullMethodName = "/protocol.PushServer/BroadcastToRoom"
 )
 
 // PushServerClient is the client API for PushServer service.
@@ -28,6 +29,8 @@ const (
 type PushServerClient interface {
 	// Broadcast send to every entity
 	Broadcast(ctx context.Context, in *BroadCastReq, opts ...grpc.CallOption) (*BroadCastReply, error)
+	// BroadcastToRoom broadcast to specific room
+	BroadcastToRoom(ctx context.Context, in *BroadCastRoomReq, opts ...grpc.CallOption) (*BroadCastRoomReply, error)
 }
 
 type pushServerClient struct {
@@ -48,12 +51,24 @@ func (c *pushServerClient) Broadcast(ctx context.Context, in *BroadCastReq, opts
 	return out, nil
 }
 
+func (c *pushServerClient) BroadcastToRoom(ctx context.Context, in *BroadCastRoomReq, opts ...grpc.CallOption) (*BroadCastRoomReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BroadCastRoomReply)
+	err := c.cc.Invoke(ctx, PushServer_BroadcastToRoom_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PushServerServer is the server API for PushServer service.
 // All implementations must embed UnimplementedPushServerServer
 // for forward compatibility.
 type PushServerServer interface {
 	// Broadcast send to every entity
 	Broadcast(context.Context, *BroadCastReq) (*BroadCastReply, error)
+	// BroadcastToRoom broadcast to specific room
+	BroadcastToRoom(context.Context, *BroadCastRoomReq) (*BroadCastRoomReply, error)
 	mustEmbedUnimplementedPushServerServer()
 }
 
@@ -66,6 +81,9 @@ type UnimplementedPushServerServer struct{}
 
 func (UnimplementedPushServerServer) Broadcast(context.Context, *BroadCastReq) (*BroadCastReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Broadcast not implemented")
+}
+func (UnimplementedPushServerServer) BroadcastToRoom(context.Context, *BroadCastRoomReq) (*BroadCastRoomReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BroadcastToRoom not implemented")
 }
 func (UnimplementedPushServerServer) mustEmbedUnimplementedPushServerServer() {}
 func (UnimplementedPushServerServer) testEmbeddedByValue()                    {}
@@ -106,6 +124,24 @@ func _PushServer_Broadcast_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PushServer_BroadcastToRoom_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BroadCastRoomReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PushServerServer).BroadcastToRoom(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PushServer_BroadcastToRoom_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PushServerServer).BroadcastToRoom(ctx, req.(*BroadCastRoomReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PushServer_ServiceDesc is the grpc.ServiceDesc for PushServer service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -116,6 +152,10 @@ var PushServer_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Broadcast",
 			Handler:    _PushServer_Broadcast_Handler,
+		},
+		{
+			MethodName: "BroadcastToRoom",
+			Handler:    _PushServer_BroadcastToRoom_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

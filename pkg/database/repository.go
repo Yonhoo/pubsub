@@ -16,12 +16,17 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// ErrRoomFull 房间已满。Controller 层用 errors.Is(err, ErrRoomFull) 判断。
+var ErrRoomFull = errors.New("room is full")
 
 // Repository 数据仓库
 type Repository struct {
@@ -84,34 +89,142 @@ func (r *Repository) DeleteRoom(ctx context.Context, roomID string) error {
 	return r.db.WithContext(ctx).Delete(&Room{}, "id = ?", roomID).Error
 }
 
+// CleanupEmptyRooms 清理空闲超过 idleFor 的房间。
+// 只删满足以下条件的 room：
+//  1. updated_at < now - idleFor
+//  2. 没有任何在线用户（room_users.left_at IS NULL）
+//
+// 删除时整个房间走单事务并行锁，避免与 Join/Leave 竞争。
+// 返回被清理的 roomID 列表，供调用方做 Redis cache 失效与 metrics 上报。
+func (r *Repository) CleanupEmptyRooms(ctx context.Context, idleFor time.Duration, batchSize int) ([]string, error) {
+	if idleFor <= 0 {
+		return nil, nil
+	}
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	idleBefore := time.Now().Add(-idleFor)
+
+	// 1. 先选出候选 roomID（不持锁，仅做候选筛选）
+	var candidates []string
+	if err := r.db.WithContext(ctx).
+		Model(&Room{}).
+		Where("updated_at < ?", idleBefore).
+		Where("NOT EXISTS (SELECT 1 FROM room_users WHERE room_users.room_id = rooms.id AND room_users.left_at IS NULL)").
+		Limit(batchSize).
+		Pluck("id", &candidates).Error; err != nil {
+		return nil, fmt.Errorf("查询空闲房间失败: %w", err)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// 2. 逐房间在事务内做"加锁 + 二次校验 + 删除"，不批量删，避免在大事务中锁太多行
+	deleted := make([]string, 0, len(candidates))
+	for _, roomID := range candidates {
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var room Room
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				First(&room, "id = ?", roomID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil // 已被并发清理
+				}
+				return err
+			}
+
+			// 二次校验：拿到行锁后房间必须仍然空闲
+			if room.UpdatedAt.After(idleBefore) {
+				return nil // 已重新活跃
+			}
+			var onlineCount int64
+			if err := tx.Model(&RoomUser{}).
+				Where("room_id = ? AND left_at IS NULL", roomID).
+				Count(&onlineCount).Error; err != nil {
+				return err
+			}
+			if onlineCount > 0 {
+				return nil // 期间又有人 Join
+			}
+
+			// 先清历史 room_users 记录（含 left_at NOT NULL 的离线记录），再删 room
+			if err := tx.Where("room_id = ?", roomID).Delete(&RoomUser{}).Error; err != nil {
+				return fmt.Errorf("删除 room_users 失败: %w", err)
+			}
+			if err := tx.Delete(&Room{}, "id = ?", roomID).Error; err != nil {
+				return fmt.Errorf("删除 room 失败: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("CleanupEmptyRooms 房间 %s 失败: %v", roomID, err)
+			continue
+		}
+		// 事务成功后再确认是否真的删除了（room 仍存在表示二次校验失败）
+		var still int64
+		if err := r.db.WithContext(ctx).Model(&Room{}).
+			Where("id = ?", roomID).Count(&still).Error; err == nil && still == 0 {
+			deleted = append(deleted, roomID)
+		}
+	}
+	return deleted, nil
+}
+
 // ========== RoomUser 操作 ==========
 
 // UserJoinRoom 用户加入房间（事务）
 func (r *Repository) UserJoinRoom(ctx context.Context, userID, userName, roomID, nodeID string, maxUsers int32) error {
-	// 在事务开始前就记录参数，确保能看到所有传入的值
-	log.Printf("🔍 [Repository] UserJoinRoom 调用: userID=%q (len=%d), userName=%q (len=%d), roomID=%q (len=%d), nodeID=%q (len=%d), maxUsers=%d",
-		userID, len(userID), userName, len(userName), roomID, len(roomID), nodeID, len(nodeID), maxUsers)
+	if userID == "" {
+		return fmt.Errorf("userID 不能为空")
+	}
+	if roomID == "" {
+		return fmt.Errorf("roomID 不能为空")
+	}
+	if nodeID == "" {
+		return fmt.Errorf("nodeID 不能为空")
+	}
+	if userName == "" {
+		userName = userID
+	}
 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. 检查房间是否存在
-		var room Room
-		if err := tx.First(&room, "id = ?", roomID).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				// 房间不存在，创建（使用传入的 maxUsers 作为默认值）
-				room = Room{
-					ID:       roomID,
-					Name:     roomID,
-					MaxUsers: int(maxUsers),
-				}
-				if err := tx.Create(&room).Error; err != nil {
-					return fmt.Errorf("创建房间失败: %w", err)
-				}
-			} else {
-				return fmt.Errorf("查询房间失败: %w", err)
-			}
+		// 1. 幂等创建房间，然后锁住 room 行作为同房间 Join/Leave 的串行点。
+		room := Room{
+			ID:       roomID,
+			Name:     roomID,
+			MaxUsers: int(maxUsers),
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&room).Error; err != nil {
+			return fmt.Errorf("创建房间失败: %w", err)
 		}
 
-		// 2. 检查房间是否已满（优先使用数据库中房间的 max_users，如果为 0 则使用传入的配置）
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&room, "id = ?", roomID).Error; err != nil {
+			return fmt.Errorf("查询房间失败: %w", err)
+		}
+
+		// 2. 检查用户是否已在房间中。已在线用户重连不增加容量占用。
+		var existingUser RoomUser
+		err := tx.Where("user_id = ? AND room_id = ? AND left_at IS NULL", userID, roomID).
+			First(&existingUser).Error
+
+		if err == nil {
+			// 用户已在房间中，更新信息（重新连接，设置为在线）
+			updateSQL := `UPDATE room_users
+			              SET user_name = ?, node_id = ?, is_online = ?, left_at = NULL
+			              WHERE id = ?`
+
+			result := tx.Exec(updateSQL, userName, nodeID, true, existingUser.ID)
+			if result.Error != nil {
+				return fmt.Errorf("更新用户信息失败 (userID=%s, roomID=%s): %w", userID, roomID, result.Error)
+			}
+			return nil
+		}
+
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return fmt.Errorf("查询用户失败: %w", err)
+		}
+
+		// 3. 检查房间是否已满（优先使用数据库中房间的 max_users，如果为 0 则使用传入的配置）
 		var currentCount int64
 		if err := tx.Model(&RoomUser{}).
 			Where("room_id = ? AND left_at IS NULL", roomID).
@@ -125,148 +238,101 @@ func (r *Repository) UserJoinRoom(ctx context.Context, userID, userName, roomID,
 			effectiveMaxUsers = int(maxUsers)
 		}
 
-		log.Printf("🔍 [Repository] 房间容量检查: roomID=%q, currentCount=%d, effectiveMaxUsers=%d (db=%d, config=%d)",
-			roomID, currentCount, effectiveMaxUsers, room.MaxUsers, maxUsers)
-
 		if effectiveMaxUsers > 0 && currentCount >= int64(effectiveMaxUsers) {
-			// 返回房间已满错误，使用自定义错误消息，方便 controller 识别
-			// 不直接返回 gorm.ErrInvalidData，而是返回包含明确消息的错误
-			return fmt.Errorf("房间已满 (当前用户数: %d, 最大用户数: %d)", currentCount, effectiveMaxUsers)
-		}
-
-		// 3. 检查用户是否已在房间中
-		var existingUser RoomUser
-		log.Printf("🔍 [Repository] 准备查询现有用户: userID=%q, roomID=%q", userID, roomID)
-
-		// 先尝试查询，如果出错则记录详细错误
-		err := tx.Where("user_id = ? AND room_id = ? AND left_at IS NULL", userID, roomID).
-			First(&existingUser).Error
-
-		if err == nil {
-			// 用户已在房间中，更新信息（重新连接，设置为在线）
-			log.Printf("✅ [Repository] 找到现有用户: ID=%d, UserID=%q, UserName=%q, NodeID=%q",
-				existingUser.ID, existingUser.UserID, existingUser.UserName, existingUser.NodeID)
-
-			// 使用原生 SQL 更新，避免 GORM 的类型转换问题
-			updateSQL := `UPDATE room_users 
-			              SET user_name = ?, node_id = ?, is_online = ?, left_at = NULL 
-			              WHERE id = ?`
-
-			log.Printf("🔍 [Repository] 准备更新用户: userID=%s, userName=%s, roomID=%s, nodeID=%s, existingID=%d",
-				userID, userName, roomID, nodeID, existingUser.ID)
-
-			result := tx.Exec(updateSQL, userName, nodeID, true, existingUser.ID)
-			if result.Error != nil {
-				log.Printf("❌ [Repository] UPDATE 失败: %v, SQL: %s, 参数: [%s, %s, true, %d]",
-					result.Error, updateSQL, userName, nodeID, existingUser.ID)
-				return fmt.Errorf("更新用户信息失败 (userID=%s, roomID=%s): %w", userID, roomID, result.Error)
-			}
-
-			log.Printf("✅ [Repository] UPDATE 成功: rowsAffected=%d", result.RowsAffected)
-			return nil
-		}
-
-		if err != nil && err != gorm.ErrRecordNotFound {
-			log.Printf("❌ [Repository] 查询用户失败: %v, 错误类型: %T", err, err)
-			log.Printf("❌ [Repository] 错误详情: %+v", err)
-			return fmt.Errorf("查询用户失败: %w", err)
-		}
-
-		if err == gorm.ErrRecordNotFound {
-			log.Printf("✅ [Repository] 用户不存在，将创建新记录")
+			// 返回 typed sentinel error，Controller 层通过 errors.Is(err, ErrRoomFull) 判断。
+			return fmt.Errorf("%w (current=%d, max=%d)", ErrRoomFull, currentCount, effectiveMaxUsers)
 		}
 
 		// 4. 创建新的用户-房间关系
-		// 验证参数
-		if userID == "" {
-			return fmt.Errorf("userID 不能为空")
-		}
-		if roomID == "" {
-			return fmt.Errorf("roomID 不能为空")
-		}
-		if nodeID == "" {
-			return fmt.Errorf("nodeID 不能为空")
-		}
-		if userName == "" {
-			userName = userID // 如果 userName 为空，使用 userID
-		}
-
-		// 记录插入参数用于调试
-		log.Printf("🔍 [Repository] 准备插入用户: userID=%q (len=%d), userName=%q (len=%d), roomID=%q (len=%d), nodeID=%q (len=%d)",
-			userID, len(userID), userName, len(userName), roomID, len(roomID), nodeID, len(nodeID))
-
-		// 使用 GORM 的 Create 方法，但只设置需要的字段，让数据库处理默认值
+		// 使用 Omit("joined_at") 让 GORM 不插入 joined_at 字段，让数据库使用默认值 CURRENT_TIMESTAMP
 		roomUser := RoomUser{
 			UserID:   userID,
 			UserName: userName,
 			RoomID:   roomID,
 			NodeID:   nodeID,
 			IsOnline: true,
-			LeftAt:   nil, // NULL 表示在线
-			JoinedAt: nil, // NULL，让数据库使用默认值 CURRENT_TIMESTAMP
+			LeftAt:   nil,
+			JoinedAt: nil,
 		}
 
-		// 使用 Omit("joined_at") 让 GORM 不插入 joined_at 字段，让数据库使用默认值 CURRENT_TIMESTAMP
-		// 注意：如果显式设置 JoinedAt 为 nil，GORM 会插入 NULL，而不是使用数据库默认值
-		// 记录创建前的完整对象状态
-		log.Printf("🔍 [Repository] 准备创建 RoomUser: UserID=%q, UserName=%q, RoomID=%q, NodeID=%q, IsOnline=%v, LeftAt=%v, JoinedAt=%v",
-			roomUser.UserID, roomUser.UserName, roomUser.RoomID, roomUser.NodeID, roomUser.IsOnline, roomUser.LeftAt, roomUser.JoinedAt)
-
 		if err := tx.Omit("joined_at").Create(&roomUser).Error; err != nil {
-			// 详细记录错误信息
-			log.Printf("❌ [Repository] INSERT 失败: %v", err)
-			log.Printf("❌ [Repository] 错误类型: %T", err)
-			log.Printf("❌ [Repository] 错误详情: %+v", err)
-			log.Printf("❌ [Repository] 参数: userID=%q, userName=%q, roomID=%q, nodeID=%q",
-				userID, userName, roomID, nodeID)
-			log.Printf("❌ [Repository] RoomUser 对象: %+v", roomUser)
 			return fmt.Errorf("创建用户房间关系失败 (userID=%s, roomID=%s, nodeID=%s): %w", userID, roomID, nodeID, err)
 		}
 
-		log.Printf("✅ [Repository] INSERT 成功: ID=%d, UserID=%q, UserName=%q, RoomID=%q, NodeID=%q",
-			roomUser.ID, roomUser.UserID, roomUser.UserName, roomUser.RoomID, roomUser.NodeID)
+		// 戳 updated_at,后台清理用它判断房间活跃度
+		if err := tx.Model(&Room{}).Where("id = ?", roomID).
+			Update("updated_at", time.Now()).Error; err != nil {
+			log.Printf("更新 room.updated_at 失败: %v", err)
+		}
 		return nil
 	})
 }
 
 // UserLeaveRoom 用户离开房间（直接删除记录）
 func (r *Repository) UserLeaveRoom(ctx context.Context, userID, roomID string) error {
-	result := r.db.WithContext(ctx).
-		Where("user_id = ? AND room_id = ? ", userID, roomID).
-		Delete(&RoomUser{})
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var room Room
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&room, "id = ?", roomID).Error
+		if err == gorm.ErrRecordNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("查询房间失败: %w", err)
+		}
 
-	if result.Error != nil {
-		return result.Error
-	}
+		result := tx.
+			Where("user_id = ? AND room_id = ? AND left_at IS NULL", userID, roomID).
+			Delete(&RoomUser{})
 
-	if result.RowsAffected == 0 {
-		log.Printf("⚠️  [Repository] 未找到要删除的用户记录: userID=%q, roomID=%q", userID, roomID)
-		// 不返回错误，因为可能记录已经被删除或不存在
+		if result.Error != nil {
+			return result.Error
+		}
+
+		if result.RowsAffected == 0 {
+			// 记录可能已经被删除，不视为错误
+			return nil
+		}
+
+		// 戳 updated_at,后台清理用它判断空闲起点
+		if err := tx.Model(&Room{}).Where("id = ?", roomID).
+			Update("updated_at", time.Now()).Error; err != nil {
+			log.Printf("更新 room.updated_at 失败: %v", err)
+		}
 		return nil
-	}
-
-	log.Printf("✅ [Repository] 已删除用户记录: userID=%q, roomID=%q, rowsAffected=%d", userID, roomID, result.RowsAffected)
-	return nil
+	})
 }
 
 // UpdateUserOnlineStatus 更新用户在线状态
 func (r *Repository) UpdateUserOnlineStatus(ctx context.Context, userID, roomID string, isOnline bool) error {
-	updates := map[string]interface{}{
-		"is_online": isOnline,
-	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var room Room
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&room, "id = ?", roomID).Error
+		if err == gorm.ErrRecordNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("查询房间失败: %w", err)
+		}
 
-	// 同时更新 left_at：在线时设为 NULL，离线时设为当前时间
-	if isOnline {
-		updates["left_at"] = nil
-	} else {
-		now := time.Now()
-		updates["left_at"] = now
-	}
+		updates := map[string]interface{}{
+			"is_online": isOnline,
+		}
 
-	return r.db.WithContext(ctx).
-		Model(&RoomUser{}).
-		Where("user_id = ? AND room_id = ? AND left_at IS NULL", userID, roomID).
-		Updates(updates).Error
+		// 同时更新 left_at：在线时设为 NULL，离线时设为当前时间
+		if isOnline {
+			updates["left_at"] = nil
+		} else {
+			now := time.Now()
+			updates["left_at"] = now
+		}
+
+		return tx.
+			Model(&RoomUser{}).
+			Where("user_id = ? AND room_id = ? AND left_at IS NULL", userID, roomID).
+			Updates(updates).Error
+	})
 }
 
 // GetRoomUsers 获取房间中的用户列表
@@ -357,4 +423,28 @@ func (r *Repository) GetRoomUserCount(ctx context.Context, roomID string) (int64
 		Where("room_id = ? AND left_at IS NULL", roomID).
 		Count(&count).Error
 	return count, err
+}
+
+// GetRoomUserCounts 一次性获取所有房间的用户数（避免 N+1 查询）。
+// 返回 map[roomID]count，只包含至少有一个在线用户的房间。
+func (r *Repository) GetRoomUserCounts(ctx context.Context) (map[string]int64, error) {
+	type rowResult struct {
+		RoomID string `gorm:"column:room_id"`
+		Count  int64  `gorm:"column:count"`
+	}
+	var rows []rowResult
+	err := r.db.WithContext(ctx).
+		Model(&RoomUser{}).
+		Select("room_id, COUNT(*) AS count").
+		Where("left_at IS NULL").
+		Group("room_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64, len(rows))
+	for _, row := range rows {
+		result[row.RoomID] = row.Count
+	}
+	return result, nil
 }

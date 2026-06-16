@@ -30,33 +30,23 @@ func main() {
 	port := getEnv("WEB_PORT", "8086")
 	pushManagerAddr := getEnv("PUSH_MANAGER_ADDR", "localhost:50053")
 
-	log.Printf("🌐 Web 服务器启动中...")
-	log.Printf("   端口: %s", port)
-	log.Printf("   Push-Manager: %s", pushManagerAddr)
-	log.Printf("")
-
 	// 连接 Push-Manager gRPC
-	log.Printf("🔗 连接 Push-Manager...")
 	conn, err := grpc.Dial(pushManagerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 		grpc.WithTimeout(10*time.Second),
 	)
 	if err != nil {
-		log.Printf("⚠️  连接 Push-Manager 失败: %v", err)
-		log.Printf("⚠️  /broadcast API 将不可用")
+		log.Printf("连接 Push-Manager 失败 (/broadcast API 将不可用): %v", err)
 		conn = nil
 	} else {
 		defer conn.Close()
-		log.Printf("✅ Push-Manager 客户端已连接")
 	}
 
 	var pushClient broadcast.PushServerClient
 	if conn != nil {
 		pushClient = broadcast.NewPushServerClient(conn)
 	}
-
-	log.Printf("")
 
 	// HTTP 路由
 	mux := http.NewServeMux()
@@ -69,7 +59,7 @@ func main() {
 		}
 
 		if pushClient == nil {
-			log.Printf("❌ Push-Manager 未连接")
+			log.Printf("Push-Manager 未连接")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(BroadcastResponse{
@@ -82,7 +72,7 @@ func main() {
 
 		var req BroadcastRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			log.Printf("❌ 解析请求失败: %v", err)
+			log.Printf("解析请求失败: %v", err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(BroadcastResponse{
@@ -105,9 +95,12 @@ func main() {
 			Body:   []byte(req.Message),
 		}
 
-		_, err := pushClient.Broadcast(ctx, &broadcast.BroadCastReq{Proto: protoMsg})
+		_, err := pushClient.BroadcastToRoom(ctx, &broadcast.BroadCastRoomReq{
+			RoomId: req.RoomID,
+			Proto:  protoMsg,
+		})
 		if err != nil {
-			log.Printf("❌ 广播失败: %v", err)
+			log.Printf("广播失败: %v", err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(BroadcastResponse{
@@ -162,7 +155,6 @@ func main() {
 		staticDir = "./"
 	}
 
-	log.Printf("📁 静态文件目录: %s", staticDir)
 	fs := http.FileServer(http.Dir(staticDir))
 	mux.Handle("/", fs)
 
@@ -182,22 +174,10 @@ func main() {
 		})
 	}
 
-	log.Printf("🌐 Web 服务器启动: http://localhost:%s", port)
-	log.Printf("")
-	log.Printf("📝 功能:")
-	log.Printf("   - 聊天页面: http://localhost:%s/chat.html", port)
-	log.Printf("   - 广播 API: POST http://localhost:%s/broadcast", port)
-	log.Printf("   - 健康检查: GET http://localhost:%s/health", port)
-	log.Printf("")
-	log.Printf("💡 使用说明:")
-	log.Printf("   1. 在不同的浏览器窗口打开聊天页面")
-	log.Printf("   2. 使用不同的用户 ID 和昵称登录")
-	log.Printf("   3. 加入相同的房间（例如：room-001）")
-	log.Printf("   4. 开始聊天！")
-	log.Printf("")
+	log.Printf("Web 服务器启动: http://localhost:%s (chat: /chat.html, broadcast: POST /broadcast, health: /health)", port)
 
 	if err := http.ListenAndServe(":"+port, corsHandler(mux)); err != nil {
-		log.Fatalf("❌ 服务器启动失败: %v", err)
+		log.Fatalf("服务器启动失败: %v", err)
 	}
 }
 

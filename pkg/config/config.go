@@ -158,6 +158,8 @@ type ETCDConfig struct {
 type RoomConfig struct {
 	DefaultMaxUsers int           // 默认房间最大用户数
 	CacheTTL        time.Duration // 房间缓存 TTL
+	EmptyTTL        time.Duration // 空房间存活时长，超过未活动则被后台清理
+	CleanupInterval time.Duration // 后台清理扫描周期，<=0 表示禁用
 }
 
 // RawYAMLConfig 原始 YAML 配置
@@ -203,6 +205,8 @@ func LoadConfigFromFile(filename string) *Config {
 		Room: &RoomConfig{
 			DefaultMaxUsers: getEnvOrYAMLInt(yamlCfg, "ROOM_MAX_USERS", "room.bucket_size", 100),
 			CacheTTL:        time.Duration(getEnvOrYAMLInt(yamlCfg, "ROOM_CACHE_TTL_MINUTES", "room.cache_ttl_minutes", 10)) * time.Minute,
+			EmptyTTL:        getEnvOrYAMLDuration(yamlCfg, "ROOM_EMPTY_TTL", "room.empty_ttl", 5*time.Minute),
+			CleanupInterval: getEnvOrYAMLDuration(yamlCfg, "ROOM_CLEANUP_INTERVAL", "room.cleanup_interval", time.Minute),
 		},
 		RpcConfig: &RpcConfig{
 			TimeOut: getEnvOrYAMLDuration(yamlCfg, "RPC_TIMEOUT_SECONDS", "rpc.timeout", 10*time.Second),

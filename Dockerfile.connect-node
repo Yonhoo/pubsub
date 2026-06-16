@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # 最终镜像
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata netcat-openbsd
 
 WORKDIR /app
 
@@ -42,8 +42,7 @@ COPY --from=builder /build/connect-node/config.yaml .
 # 设置时区
 ENV TZ=Asia/Shanghai
 
-EXPOSE 50052 8080 9091
+EXPOSE 50052 8083 9091 6060
 
 CMD ["./connect-node"]
-
 

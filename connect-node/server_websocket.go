@@ -99,8 +99,6 @@ var (
 	enableWriteTraceLog = os.Getenv("CONNECT_NODE_WRITE_TRACE_LOG") == "1"
 	// Monotonic ID used to bind one websocket session to one shared writer shard.
 	sharedWriteSessionSeq uint64
-	// Monotonic ID used for round-robin selection of round reader/writer pools.
-	roundSessionSeq uint64
 )
 
 // InitWebsocketLogger 初始化 WebSocket 日志输出到文件
@@ -115,7 +113,6 @@ func InitWebsocketLogger(logFile string) error {
 		}
 		// 同时输出到控制台和文件
 		logWriter = io.MultiWriter(os.Stdout, f)
-		log.Printf("[server_websocket] 日志已写入文件: %s", logFile)
 	}
 
 	wsLogger = log.New(logWriter, "", log.LstdFlags)
@@ -164,20 +161,8 @@ func InitWebsocket(server *ConnectNodeServer, addrs []string, accept int) (err e
 			}
 		}
 
-		// 根据 session ID 选择 round（用于负载均衡）
-		// 可以使用 session ID 的哈希值
-		//r = 0 // 可以根据 session ID 计算哈希
-
-		// 从 round 获取 pool
-		//tr := server.round.Timer(r)
-		roundIdx := int(atomic.AddUint64(&roundSessionSeq, 1) - 1)
-		rp := server.round.Reader(roundIdx)
-		wp := server.round.Writer(roundIdx)
-
-		// new session 的时候 ，确定好 对应 bucket， 创建 channel，初始化 上下文 ctx
-
-		// 创建 ProtoPackageHandler
-		protoPkgHandler := gettypkg.NewProtoPackageHandler(rp, wp)
+		// 创建 ProtoPackageHandler（buffer 通过 server-level sync.Pool 管理）
+		protoPkgHandler := gettypkg.NewProtoPackageHandler()
 
 		//server.sessionMap[&session] = &clientProtoSession{
 		//	session: session,
@@ -378,16 +363,6 @@ func (h *ProtoMessageHandler) dispatchWebsocket(session getty.Session) {
 				// 5. 释放 Buffer（消息处理完成）
 				pwb.Release()
 			}
-
-		default:
-			// 服务端推送的消息（通过 Broadcast/BroadcastRoom 推送）
-			if err := h.writeProto(session, p, "broadcast"); err != nil {
-				if !h.isSharedWriterQueueFull(err) {
-					wsLog("❌ [ProtoHandler] 发送推送消息失败: %v", err)
-				}
-			} else {
-				h.markWriteTime()
-			}
 		}
 
 	}
@@ -491,14 +466,30 @@ func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *pro
 			return fmt.Errorf("JoinRoom 失败: %s", resp.Message)
 		}
 
-		wsLog("✅ [ProtoHandler] JoinRoom 成功 room=%s user=%s elapsed=%v", p.Roomid, p.Userid, elapsed)
-
-		bucket := h.server.Bucket(h.channel.Key)
-		if bucket != nil {
-			if err := bucket.ChangeRoom(p.Roomid, h.channel); err != nil {
-				wsLog("❌ [ProtoHandler] 设置 channel.Room 失败: %v", err)
-			}
+		bucket := h.server.Bucket(p.Userid)
+		if bucket == nil {
+			return fmt.Errorf("bucket unavailable")
 		}
+
+		h.rwlock.RLock()
+		wasAuth := h.auth
+		h.rwlock.RUnlock()
+
+		if wasAuth {
+			if err := bucket.ChangeRoom(p.Roomid, h.channel); err != nil {
+				wsLog("❌ [ProtoHandler] 切换 channel.Room 失败: %v", err)
+				return err
+			}
+		} else if err := bucket.Put(p.Roomid, h.channel); err != nil {
+			wsLog("❌ [ProtoHandler] 设置 channel.Room 失败: %v", err)
+			return err
+		}
+		h.rwlock.Lock()
+		h.bucket = bucket
+		h.roomId = p.Roomid
+		h.clientId = p.Userid
+		h.auth = true
+		h.rwlock.Unlock()
 
 		h.channel.Watch(2)
 
@@ -576,7 +567,7 @@ func (h *ProtoMessageHandler) cleanupUser() {
 
 	if bucket != nil && channel != nil {
 		bucket.Del(channel)
-		channel.Room = nil
+		channel.Room.Store(nil)
 	}
 	if h.server != nil {
 		if err := h.server.EnqueueLeaveWithShutdownFallback(userId, roomId); err != nil {
@@ -592,21 +583,25 @@ func (h *ProtoMessageHandler) authWebsocket(p *proto.Proto, session getty.Sessio
 	if p.Roomid != "" && p.Userid != "" && (p.Op == proto.OpAuth || p.Op == 1) {
 		// redis check login session (这里可以添加实际的认证逻辑)
 
-		h.roomId = p.Roomid
-		h.clientId = p.Userid
-
-		h.bucket = h.server.Bucket(p.Userid)
-
-		// ⚠️ 重要：设置 channel.Key，使用 userId 作为唯一标识
-		// 如果不设置 Key，所有 channel 的 key 都是空字符串，会导致 bucket.Put 时关闭错误的 channel
-		h.channel.Key = p.Userid
-		if remoteAddr := session.RemoteAddr(); remoteAddr != "" {
-			h.channel.IP = remoteAddr
+		bucket := h.server.Bucket(p.Userid)
+		if bucket == nil {
+			return fmt.Errorf("bucket unavailable")
 		}
 
-		h.bucket.Put(p.Roomid, h.channel)
-		h.auth = true
-		wsLog("✅ [ProtoHandler] 鉴权成功 room=%s user=%s", p.Roomid, p.Userid)
+		h.rwlock.Lock()
+		h.roomId = p.Roomid
+		h.clientId = p.Userid
+		h.bucket = bucket
+
+		// ⚠️ 重要：设置 channel.Key 和 IP，使用 roomId:userId 作为唯一标识。
+		// SetKeyIP 通过 sync.Once 确保只设置一次，避免 race condition。
+		// Key 使用复合键确保同一 userId 可以加入不同房间而不冲突。
+		remoteAddr := session.RemoteAddr()
+		compositeKey := p.Roomid + ":" + p.Userid
+		h.channel.SetKeyIP(compositeKey, remoteAddr)
+
+		h.rwlock.Unlock()
+
 		return nil
 	}
 
@@ -778,95 +773,85 @@ func (h *ProtoMessageHandler) writeTraceEnd() {
 }
 
 func (h *ProtoMessageHandler) OnCron(session getty.Session) {
-	// Low-frequency write stats to help correlate CPU profiles with actual write contention.
-	// This is intentionally throttled to avoid adding more lock contention via logging.
+	h.logStatsIfNeeded()
+	h.checkSessionTimeout(session)
+}
+
+func (h *ProtoMessageHandler) logStatsIfNeeded() {
+	if !enableWriteTraceLog {
+		return
+	}
+
 	now := time.Now().UnixNano()
 	last := atomic.LoadInt64(&h.writeLastStatLogNano)
-	if now-last >= int64(10*time.Second) && atomic.CompareAndSwapInt64(&h.writeLastStatLogNano, last, now) {
-		concurrent := atomic.LoadUint64(&h.writeConcurrent)
-		if concurrent != 0 && enableWriteTraceLog {
-			// Avoid noisy logs per session; only report when we have observed concurrent writes.
-			remote := ""
-			if h.channel != nil {
-				remote = h.channel.IP
-			}
-			wsLog("[stat] ws writes: total=%d concurrent=%d inFlight=%d remote=%s",
-				atomic.LoadUint64(&h.writeTotal),
-				concurrent,
-				atomic.LoadInt32(&h.writeInFlight),
+	if now-last < int64(10*time.Second) || !atomic.CompareAndSwapInt64(&h.writeLastStatLogNano, last, now) {
+		return
+	}
+
+	remote := ""
+	if h.channel != nil {
+		remote = h.channel.IP
+	}
+
+	// 写入统计
+	if concurrent := atomic.LoadUint64(&h.writeConcurrent); concurrent != 0 {
+		wsLog("[stat] ws writes: total=%d concurrent=%d inFlight=%d remote=%s",
+			atomic.LoadUint64(&h.writeTotal),
+			concurrent,
+			atomic.LoadInt32(&h.writeInFlight),
+			remote,
+		)
+	}
+
+	// 批处理统计
+	if flushes := atomic.LoadUint64(&h.batchFlushes); flushes != 0 {
+		pkgs := atomic.LoadUint64(&h.batchFlushedPkgs)
+		avgPkgs := float64(pkgs) / float64(flushes)
+		if avgPkgs > 1.05 {
+			wsLog("[stat] ws batch: enqueued=%d flushes=%d pkgs=%d avgPkgs=%.2f bytes=%d maxPkgs=%d remote=%s",
+				atomic.LoadUint64(&h.batchEnqueued),
+				flushes,
+				pkgs,
+				avgPkgs,
+				atomic.LoadUint64(&h.batchFlushedBytes),
+				atomic.LoadUint32(&h.batchMaxPkgsPerFlush),
 				remote,
 			)
 		}
-
-		flushes := atomic.LoadUint64(&h.batchFlushes)
-		if flushes != 0 && enableWriteTraceLog {
-			pkgs := atomic.LoadUint64(&h.batchFlushedPkgs)
-			bytes := atomic.LoadUint64(&h.batchFlushedBytes)
-			enq := atomic.LoadUint64(&h.batchEnqueued)
-			failures := atomic.LoadUint64(&h.batchEnqueueFailures)
-			queueFull := atomic.LoadUint64(&h.batchEnqueueQueueFull)
-			maxPkgs := atomic.LoadUint32(&h.batchMaxPkgsPerFlush)
-			avgPkgs := float64(pkgs) / float64(flushes)
-			remote := ""
-			if h.channel != nil {
-				remote = h.channel.IP
-			}
-			// Only print when batching is meaningfully doing work (avg > 1).
-			if avgPkgs > 1.05 {
-				wsLog("[stat] ws batch: enqueued=%d flushes=%d pkgs=%d avgPkgs=%.2f bytes=%d maxPkgs=%d remote=%s",
-					enq, flushes, pkgs, avgPkgs, bytes, maxPkgs, remote)
-			}
-			if failures != 0 {
-				wsLog("[stat] ws enqueue failures: total=%d queueFull=%d remote=%s", failures, queueFull, remote)
-			}
+		if failures := atomic.LoadUint64(&h.batchEnqueueFailures); failures != 0 {
+			wsLog("[stat] ws enqueue failures: total=%d queueFull=%d remote=%s",
+				failures,
+				atomic.LoadUint64(&h.batchEnqueueQueueFull),
+				remote,
+			)
 		}
 	}
+}
 
-	// 使用配置的 session_timeout（默认 180 秒，给心跳留出更多缓冲）
+func (h *ProtoMessageHandler) checkSessionTimeout(session getty.Session) {
 	timeout := h.server.config.GettyConfig.SessionTimeout
 	if timeout == 0 {
-		timeout = 180 * time.Second // 默认值改为 180 秒（6倍心跳周期）
+		timeout = 180 * time.Second
 	}
-
-	// 如果超时时间设置为 0 或负数，则禁用超时检查
 	if timeout <= 0 {
 		return
 	}
 
-	// Getty 的 GetActive() 只在读取时更新，写入不会更新
-	// 所以我们需要同时检查读取活跃时间和写入活跃时间
+	// 取读取和写入活跃时间中较新的
 	readActiveTime := session.GetActive()
-	timeSinceRead := time.Since(readActiveTime)
-
-	// 检查写入活跃时间
 	lastWriteNano := atomic.LoadInt64(&h.lastWriteTimeNano)
-	var lastWriteTime time.Time
-	if lastWriteNano > 0 {
-		lastWriteTime = time.Unix(0, lastWriteNano)
-	}
-	timeSinceWrite := time.Since(lastWriteTime)
+	lastWriteTime := time.Unix(0, lastWriteNano)
 
-	// 取两者中较新的时间作为活跃时间
 	var timeSinceActive time.Duration
-	var _ time.Time
-	if !lastWriteTime.IsZero() && lastWriteTime.After(readActiveTime) {
-		// 如果写入时间更新，使用写入时间
-		timeSinceActive = timeSinceWrite
-		_ = lastWriteTime
+	if lastWriteNano > 0 && lastWriteTime.After(readActiveTime) {
+		timeSinceActive = time.Since(lastWriteTime)
 	} else {
-		// 否则使用读取时间
-		timeSinceActive = timeSinceRead
-		_ = readActiveTime
+		timeSinceActive = time.Since(readActiveTime)
 	}
 
-	// 记录每次检查的详细信息（用于调试）
 	if timeSinceActive > timeout {
-		wsLog("⏰ [ProtoHandler] Session 超时，关闭连接: %s (超时阈值: %v, 距离上次活跃: %v, 读取活跃: %v, 写入活跃: %v)",
-			session.RemoteAddr(), timeout, timeSinceActive, readActiveTime, lastWriteTime)
-
-		// 清理用户（如果已认证）
-		//h.cleanupUser()
-
+		wsLog("⏰ [ProtoHandler] Session 超时，关闭连接: %s (超时: %v, 距上次活跃: %v)",
+			session.RemoteAddr(), timeout, timeSinceActive)
 		session.Close()
 	}
 }

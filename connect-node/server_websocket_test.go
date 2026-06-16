@@ -288,8 +288,8 @@ func TestJoinRoomSuccessWaitsForControllerBeforeAck(t *testing.T) {
 	if body.Code != 0 {
 		t.Fatalf("expected success response, got %+v", body)
 	}
-	if h.channel.Room == nil || h.channel.Room.ID != req.Roomid {
-		t.Fatalf("expected channel room=%s, got %#v", req.Roomid, h.channel.Room)
+	if r := h.channel.Room.Load(); r == nil || r.ID != req.Roomid {
+		t.Fatalf("expected channel room=%s, got %#v", req.Roomid, r)
 	}
 	if !h.channel.NeedPush(2) {
 		t.Fatal("expected join success to watch op=2 before returning")
@@ -324,8 +324,8 @@ func TestJoinRoomFailureReturnsErrorAckWithoutRoomMutation(t *testing.T) {
 	if body.Code == 0 {
 		t.Fatalf("expected non-success response, got %+v", body)
 	}
-	if h.channel.Room != nil {
-		t.Fatalf("expected room to remain unset on join failure, got %#v", h.channel.Room)
+	if r := h.channel.Room.Load(); r != nil {
+		t.Fatalf("expected room to remain unset on join failure, got %#v", r)
 	}
 	if h.channel.NeedPush(2) {
 		t.Fatal("expected join failure to not register watch op=2")
@@ -358,8 +358,8 @@ func TestCleanupUserUnbindsLocallyBeforeAsyncLeaveCompletes(t *testing.T) {
 	if got := h.bucket.ChannelCount(); got != 0 {
 		t.Fatalf("expected local bucket cleanup before leave completes, got %d channels", got)
 	}
-	if h.channel.Room != nil {
-		t.Fatalf("expected local channel room cleared, got %#v", h.channel.Room)
+	if r := h.channel.Room.Load(); r != nil {
+		t.Fatalf("expected local channel room cleared, got %#v", r)
 	}
 
 	close(releaseLeave)
@@ -490,8 +490,8 @@ func TestCleanupUserCompensatesLeaveWhenQueueClosed(t *testing.T) {
 	if got := bucket.ChannelCount(); got != 0 {
 		t.Fatalf("expected local bucket cleanup before compensation leave, got %d channels", got)
 	}
-	if h.channel.Room != nil {
-		t.Fatalf("expected local channel room cleared, got %#v", h.channel.Room)
+	if r := h.channel.Room.Load(); r != nil {
+		t.Fatalf("expected local channel room cleared, got %#v", r)
 	}
 
 	deadline := time.Now().Add(time.Second)
@@ -804,6 +804,38 @@ func TestStopConcurrentBroadcastRoomNoPanicAndStableStopErrors(t *testing.T) {
 		Proto:  &proto.Proto{Op: 2, Seq: 9},
 	}); !errors.Is(err, ErrWorkerQueueClosed) {
 		t.Fatalf("expected ErrWorkerQueueClosed after stop, got %v", err)
+	}
+}
+
+func TestBroadcastRoomWithoutWorkersReturnsUnavailableAndDoesNotFallback(t *testing.T) {
+	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8}
+	bucket := NewBucket(bucketCfg)
+	var pushed int64
+	ch := NewChannel(8, 8)
+	ch.Key = "user-room"
+	ch.SetServerPushWriter(func(*proto.Proto) error {
+		atomic.AddInt64(&pushed, 1)
+		return nil
+	})
+	if err := bucket.Put("room-with-user", ch); err != nil {
+		t.Fatalf("put channel into room: %v", err)
+	}
+
+	server := &ConnectNodeServer{
+		buckets:   []*Bucket{bucket},
+		bucketIdx: 1,
+	}
+	server.queueState = queueStateRunning
+
+	_, err := server.BroadcastRoom(context.Background(), &push.BroadcastRoomReq{
+		RoomID: "room-with-user",
+		Proto:  &proto.Proto{Op: 2, Seq: 1},
+	})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("expected Unavailable when room workers are unavailable, got %v", err)
+	}
+	if got := atomic.LoadInt64(&pushed); got != 0 {
+		t.Fatalf("expected no bucket fallback push, got %d pushes", got)
 	}
 }
 

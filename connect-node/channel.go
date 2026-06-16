@@ -47,7 +47,10 @@ func dropLog(format string, v ...interface{}) {
 }
 
 type Channel struct {
-	Room           *Room
+	// Room 是当前 channel 关联的房间。原子指针，避免 Bucket 锁外读写 race。
+	// 写入：Bucket.Put / ChangeRoom（持有 Bucket.cLock 时）和 cleanupUser（无锁）。
+	// 读取：Bucket.Broadcast snapshot 后（无锁）、Channel.Push 日志路径（无锁）。
+	Room           atomic.Pointer[Room]
 	ClientReqQueue RingPWB // 改用 RingPWB 存储 ProtoWithBuffer 指针
 	signal         chan *protocol.Proto
 	ready          chan struct{}
@@ -56,11 +59,14 @@ type Channel struct {
 	Next *Channel
 	Prev *Channel
 
-	Mid      int64
-	Key      string
-	IP       string
-	watchOps map[int32]struct{}
-	mutex    sync.RWMutex
+	Mid int64
+	// Key 和 IP 在 auth 阶段设置一次，之后视为只读。
+	// 使用 setKeyIPOnce 确保只设置一次，避免 race。
+	Key          string
+	IP           string
+	setKeyIPOnce sync.Once
+	watchOps     map[int32]struct{}
+	mutex        sync.RWMutex
 	// serverPushWriter routes server-side pushes directly to shared writer shard.
 	// When nil, fallback to legacy signal-queue path.
 	serverPushWriter func(*protocol.Proto) error
@@ -83,6 +89,15 @@ func NewChannel(cli, svr int) *Channel {
 
 	c.watchOps = make(map[int32]struct{})
 	return c
+}
+
+// SetKeyIP 设置 channel 的 Key 和 IP，只能调用一次。
+// 这确保 Key 和 IP 在设置后变为只读，避免 race。
+func (c *Channel) SetKeyIP(key, ip string) {
+	c.setKeyIPOnce.Do(func() {
+		c.Key = key
+		c.IP = ip
+	})
 }
 
 // watch is sub channel
@@ -135,8 +150,8 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 			dropLog("⚠️  [Channel.Push] Shared writer enqueue failed! Key=%s, Room=%s, Err=%v, DropCount=%d, GlobalDrop=%d",
 				c.Key,
 				func() string {
-					if c.Room != nil {
-						return c.Room.ID
+					if r := c.Room.Load(); r != nil {
+						return r.ID
 					}
 					return "nil"
 				}(),
@@ -147,34 +162,34 @@ func (c *Channel) Push(p *protocol.Proto) (err error) {
 		return
 	}
 
-	select {
-	case c.signal <- p:
-		// 成功推送
-	default:
-		// signal channel 满了，消息被丢弃
-		err = pkg.ErrSignalFullMsgDropped
-		recordCriticalDrop("push", "signal_full")
-
-		// 增加丢弃计数
-		dropCount := atomic.AddInt64(&c.pushDropCount, 1)
-		globalDrop := atomic.AddInt64(&globalPushDropCount, 1)
-
-		// 记录详细日志（每 100 次丢弃打印一次，避免日志爆炸）
-		if dropCount%100 == 1 {
-			dropLog("⚠️  [Channel.Push] Signal channel FULL! Key=%s, Room=%s, ChannelLen=%d/%d, DropCount=%d, GlobalDrop=%d",
-				c.Key,
-				func() string {
-					if c.Room != nil {
-						return c.Room.ID
-					}
-					return "nil"
-				}(),
-				len(c.signal),
-				cap(c.signal),
-				dropCount,
-				globalDrop)
-		}
-	}
+	//select {
+	//case c.signal <- p:
+	//	// 成功推送
+	//default:
+	//	// signal channel 满了，消息被丢弃
+	//	err = pkg.ErrSignalFullMsgDropped
+	//	recordCriticalDrop("push", "signal_full")
+	//
+	//	// 增加丢弃计数
+	//	dropCount := atomic.AddInt64(&c.pushDropCount, 1)
+	//	globalDrop := atomic.AddInt64(&globalPushDropCount, 1)
+	//
+	//	// 记录详细日志（每 100 次丢弃打印一次，避免日志爆炸）
+	//	if dropCount%100 == 1 {
+	//		dropLog("⚠️  [Channel.Push] Signal channel FULL! Key=%s, Room=%s, ChannelLen=%d/%d, DropCount=%d, GlobalDrop=%d",
+	//			c.Key,
+	//			func() string {
+	//				if r := c.Room.Load(); r != nil {
+	//					return r.ID
+	//				}
+	//				return "nil"
+	//			}(),
+	//			len(c.signal),
+	//			cap(c.signal),
+	//			dropCount,
+	//			globalDrop)
+	//	}
+	//}
 
 	return
 }

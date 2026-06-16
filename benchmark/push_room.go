@@ -19,6 +19,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -75,6 +76,7 @@ func main() {
 	var ok, fail, total int64
 	startTime := time.Now()
 	stop := time.After(*dur)
+	done := make(chan struct{})
 
 	// 统计协程：每 5 秒打印一次统计信息
 	go func() {
@@ -87,7 +89,7 @@ func main() {
 
 		for {
 			select {
-			case <-stop:
+			case <-done:
 				return
 			case <-statTicker.C:
 				nowOk := atomic.LoadInt64(&ok)
@@ -119,6 +121,7 @@ func main() {
 		// 速率限制模式：使用 ticker 控制发送速率
 		runRateLimitedMode(client, *addr, bodyBytes, *rate, stop, &ok, &fail, &total, *verbose, *room)
 	}
+	close(done)
 
 	// 打印最终统计
 	printFinalStats(startTime, &ok, &fail, &total)
@@ -160,14 +163,20 @@ func runRateLimitedMode(client *http.Client, addr string, bodyBytes []byte, rate
 	interval := time.Second / time.Duration(rateLimit)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var wg sync.WaitGroup
 
 	for {
 		select {
 		case <-stop:
+			wg.Wait()
 			return
 		case <-ticker.C:
 			atomic.AddInt64(total, 1)
-			go sendBroadcast(client, addr, bodyBytes, ok, fail, verbose, room)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sendBroadcast(client, addr, bodyBytes, ok, fail, verbose, room)
+			}()
 		}
 	}
 }

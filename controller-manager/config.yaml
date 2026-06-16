@@ -68,6 +68,10 @@ room:
   bucket_size: ${ROOM_BUCKET_SIZE:1000}
   # 房间队列大小
   queue_size: ${ROOM_QUEUE_SIZE:1024}
+  # 空房间存活时长，超过未活动则被后台清理
+  empty_ttl: ${ROOM_EMPTY_TTL:5m}
+  # 后台清理扫描周期，<=0 表示禁用
+  cleanup_interval: ${ROOM_CLEANUP_INTERVAL:1m}
 
 # Bucket 配置（环形缓冲区）
 bucket:

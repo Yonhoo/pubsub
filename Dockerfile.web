@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o web-server main.g
 # 最终镜像
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates curl
 
 WORKDIR /root/
 
@@ -41,4 +41,3 @@ EXPOSE 8086
 
 # 启动服务
 CMD ["./web-server"]
-

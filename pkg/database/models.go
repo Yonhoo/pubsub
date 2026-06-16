@@ -28,6 +28,9 @@ type Room struct {
 	MaxUsers    int       `gorm:"column:max_users;default:100" json:"max_users"`
 	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
 	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
+
+	// has-many 关系：通过 RoomUser.RoomID 关联（仅供 Preload("RoomUsers") 使用，不入表）
+	RoomUsers []RoomUser `gorm:"foreignKey:RoomID;references:ID" json:"room_users,omitempty"`
 }
 
 // RoomUser 用户-房间关系表（多对多）

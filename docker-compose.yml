@@ -13,7 +13,7 @@ services:
       MYSQL_USER: pubsub
       MYSQL_PASSWORD: pubsub123
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -54,6 +54,7 @@ services:
       - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
       - ETCD_INITIAL_CLUSTER_STATE=new
       - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_DATA_DIR=/etcd-data
     ports:
       - "2379:2379"
       - "2380:2380"
@@ -62,7 +63,7 @@ services:
     networks:
       - pubsub-network
     healthcheck:
-      test: ["CMD", "etcdctl", "endpoint", "health"]
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -88,9 +89,9 @@ services:
       dockerfile: Dockerfile.controller
     container_name: pubsub-controller-1
     environment:
-      - CONTROLLER_ID=controller-1
+      - SERVER_ID=controller-1
       - NODE_ADDR=controller
-      - GRPC_PORT=50051
+      - SERVER_PORT=50051
       - METRICS_PORT=9090
       - DB_HOST=mysql
       - DB_PORT=3306
@@ -155,7 +156,7 @@ services:
     networks:
       - pubsub-network
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8083"]
+      test: ["CMD-SHELL", "nc -z localhost 50052 && nc -z localhost 8083"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -195,7 +196,7 @@ services:
     networks:
       - pubsub-network
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8083"]
+      test: ["CMD-SHELL", "nc -z localhost 50052 && nc -z localhost 8083"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -235,7 +236,7 @@ services:
     networks:
       - pubsub-network
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8083"]
+      test: ["CMD-SHELL", "nc -z localhost 50052 && nc -z localhost 8083"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -250,6 +251,7 @@ services:
     container_name: pubsub-push-manager-1
     environment:
       - MANAGER_ID=push-manager-1
+      - NODE_ADDR=push-manager
       - GRPC_PORT=50053
       - METRICS_PORT=9093
       - CONFIG_FILE=config.yaml
@@ -309,5 +311,3 @@ volumes:
   mysql-data:
   redis-data:
   etcd-data:
-
-

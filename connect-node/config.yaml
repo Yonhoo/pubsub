@@ -74,7 +74,7 @@ getty:
   heartbeat_period: 30s
   # 会话超时（设置为心跳周期的 3-4 倍，给心跳留出足够缓冲时间）
   # 注意：如果设置为 0 或负数，则禁用超时检查
-  session_timeout: 180s
+  session_timeout: 300s
   # 最大会话数
   session_number: 10000
   

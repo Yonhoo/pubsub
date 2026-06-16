@@ -71,7 +71,7 @@ func (b *Bucket) ChangeRoom(newRoomID string, channel *Channel) (err error) {
 	var (
 		newRoom      *Room
 		ok           bool
-		originalRoom = channel.Room
+		originalRoom = channel.Room.Load()
 	)
 
 	if newRoomID == "" {
@@ -79,7 +79,7 @@ func (b *Bucket) ChangeRoom(newRoomID string, channel *Channel) (err error) {
 			b.DelRoom(originalRoom)
 		}
 
-		channel.Room = nil
+		channel.Room.Store(nil)
 		return
 	}
 
@@ -101,7 +101,7 @@ func (b *Bucket) ChangeRoom(newRoomID string, channel *Channel) (err error) {
 		return
 	}
 
-	channel.Room = newRoom
+	channel.Room.Store(newRoom)
 	return
 
 }
@@ -109,18 +109,17 @@ func (b *Bucket) ChangeRoom(newRoomID string, channel *Channel) (err error) {
 func (b *Bucket) Put(roomId string, channel *Channel) (err error) {
 
 	var (
-		room *Room
-		ok   bool
+		room       *Room
+		ok         bool
+		oldChannel *Channel
+		oldRoom    *Room
 	)
 
 	lockStart := time.Now()
 	b.cLock.Lock()
 	lockBlock := time.Since(lockStart)
 
-	if oldChannel := b.chs[channel.Key]; oldChannel != nil {
-		oldChannel.Close()
-	}
-
+	oldChannel = b.chs[channel.Key]
 	b.chs[channel.Key] = channel
 
 	if roomId != "" {
@@ -129,12 +128,25 @@ func (b *Bucket) Put(roomId string, channel *Channel) (err error) {
 			b.rooms[roomId] = room
 		}
 
-		channel.Room = room
+		channel.Room.Store(room)
 	}
 
 	b.ipCnts[channel.IP]++
 	b.cLock.Unlock()
 	recordCriticalLockBlock("bucket", "put", lockBlock)
+
+	// 在锁外关闭旧连接并从其 Room 链表中移除
+	if oldChannel != nil {
+		oldChannel.Close()
+		// 从旧 channel 的 Room 链表中移除
+		if oldRoom = oldChannel.Room.Load(); oldRoom != nil {
+			if oldRoom.Del(oldChannel) {
+				// 如果房间为空，删除房间
+				b.DelRoom(oldRoom)
+			}
+		}
+	}
+
 	if room != nil {
 		err = room.Put(channel)
 	}
@@ -143,21 +155,21 @@ func (b *Bucket) Put(roomId string, channel *Channel) (err error) {
 }
 
 func (b *Bucket) Del(dch *Channel) {
-	room := dch.Room
+	room := dch.Room.Load()
 
 	lockStart := time.Now()
 	b.cLock.Lock()
 	lockBlock := time.Since(lockStart)
 
-	if ch, ok := b.chs[dch.Key]; ok {
-		if ch == dch {
-			delete(b.chs, ch.Key)
-		}
+	if ch, ok := b.chs[dch.Key]; ok && ch == dch {
+		delete(b.chs, ch.Key)
 
-		if b.ipCnts[ch.IP] > 1 {
-			b.ipCnts[ch.IP]--
+		// 只有当删除的确实是这个 channel 时才减少 ipCnts
+		// 使用 dch.IP（被删除的连接的 IP），而不是 ch.IP
+		if b.ipCnts[dch.IP] > 1 {
+			b.ipCnts[dch.IP]--
 		} else {
-			delete(b.ipCnts, ch.IP)
+			delete(b.ipCnts, dch.IP)
 		}
 	}
 
@@ -227,9 +239,11 @@ func (b *Bucket) Broadcast(p *protocol.Proto, op int32) {
 
 		// 只有当 channel 的 room 与消息的 roomId 匹配时才推送
 		// 如果消息没有指定 roomId（空字符串），则广播给所有客户端
-		if p.Roomid != "" && ch.Room != nil && ch.Room.ID != p.Roomid {
-			skippedByRoom++
-			continue
+		if p.Roomid != "" {
+			if r := ch.Room.Load(); r != nil && r.ID != p.Roomid {
+				skippedByRoom++
+				continue
+			}
 		}
 
 		if err := ch.Push(p); err != nil {

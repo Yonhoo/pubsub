@@ -67,6 +67,11 @@ func (r *Room) Del(ch *Channel) bool {
 // Push push msg to the room, if chan full discard it.
 func (r *Room) PushMsg(p *protocol.Proto) {
 	r.rLock.RLock()
+	// 如果房间已标记为 drop，不再推送消息
+	if r.drop {
+		r.rLock.RUnlock()
+		return
+	}
 	for ch := r.next; ch != nil; ch = ch.Next {
 		_ = ch.Push(p)
 	}
@@ -75,11 +80,12 @@ func (r *Room) PushMsg(p *protocol.Proto) {
 
 // Close close the room.
 func (r *Room) Close() {
-	r.rLock.RLock()
+	r.rLock.Lock()
+	r.drop = true
 	for ch := r.next; ch != nil; ch = ch.Next {
 		ch.Close()
 	}
-	r.rLock.RUnlock()
+	r.rLock.Unlock()
 }
 
 // OnlineNum the room all online.

@@ -148,7 +148,7 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 		delete(s.sessions, ev.sessionID)
 	case writeEventEnqueue:
 		st, ok := s.sessions[ev.sessionID]
-		if !ok || st.handler == nil || st.session == nil || ev.msg == nil {
+		if !ok || ev.msg == nil {
 			return
 		}
 		data, err := st.handler.Write(st.session, ev.msg)
@@ -205,54 +205,68 @@ func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 	pkgs := len(st.pending)
 	bytes := st.pendingBytes
 	owner := st.owner
+
 	if owner != nil {
 		owner.writeTraceStart("shared-batch")
+		defer owner.writeTraceEnd()
 	}
+
 	if _, err := st.session.WriteBytesArray(st.pending...); err != nil {
 		wsLog("❌ [SharedWriter] WriteBytesArray failed: %v", err)
 	} else if owner != nil {
-		owner.markWriteTime()
-		atomic.AddUint64(&owner.batchFlushes, 1)
-		switch trigger {
-		case flushTriggerCount:
-			atomic.AddUint64(&owner.batchFlushByCount, 1)
-		case flushTriggerBytes:
-			atomic.AddUint64(&owner.batchFlushByBytes, 1)
-		case flushTriggerTimeout:
-			atomic.AddUint64(&owner.batchFlushByTimeout, 1)
-		}
-		atomic.AddUint64(&owner.batchFlushedPkgs, uint64(pkgs))
-		atomic.AddUint64(&owner.batchFlushedBytes, uint64(bytes))
-		for {
-			old := atomic.LoadUint32(&owner.batchMaxPkgsPerFlush)
-			if uint32(pkgs) <= old {
-				break
-			}
-			if atomic.CompareAndSwapUint32(&owner.batchMaxPkgsPerFlush, old, uint32(pkgs)) {
-				break
-			}
-		}
-		if pkgs > 1 {
-			now := time.Now().UnixNano()
-			last := atomic.LoadInt64(&owner.batchLastFlushLogNano)
-			if now-last >= int64(time.Second) && atomic.CompareAndSwapInt64(&owner.batchLastFlushLogNano, last, now) {
-				remote := ""
-				if owner.channel != nil {
-					remote = owner.channel.IP
-				}
-				if enableWriteTraceLog {
-					wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
-				}
-			}
-		}
-	}
-	if owner != nil {
-		owner.writeTraceEnd()
+		s.updateOwnerStats(owner, pkgs, bytes, trigger)
 	}
 
 	st.pending = st.pending[:0]
 	st.pendingBytes = 0
 	st.deadline = time.Time{}
+}
+
+func (s *flushShard) updateOwnerStats(owner *ProtoMessageHandler, pkgs, bytes int, trigger flushTrigger) {
+	owner.markWriteTime()
+	atomic.AddUint64(&owner.batchFlushes, 1)
+
+	switch trigger {
+	case flushTriggerCount:
+		atomic.AddUint64(&owner.batchFlushByCount, 1)
+	case flushTriggerBytes:
+		atomic.AddUint64(&owner.batchFlushByBytes, 1)
+	case flushTriggerTimeout:
+		atomic.AddUint64(&owner.batchFlushByTimeout, 1)
+	}
+
+	atomic.AddUint64(&owner.batchFlushedPkgs, uint64(pkgs))
+	atomic.AddUint64(&owner.batchFlushedBytes, uint64(bytes))
+
+	// Update max packages per flush (atomic max operation)
+	updateAtomicMax(&owner.batchMaxPkgsPerFlush, uint32(pkgs))
+
+	// Log batch flush (throttled)
+	if pkgs > 1 && enableWriteTraceLog {
+		s.logBatchFlushIfNeeded(owner, pkgs, bytes)
+	}
+}
+
+func updateAtomicMax(addr *uint32, val uint32) {
+	for {
+		old := atomic.LoadUint32(addr)
+		if val <= old || atomic.CompareAndSwapUint32(addr, old, val) {
+			return
+		}
+	}
+}
+
+func (s *flushShard) logBatchFlushIfNeeded(owner *ProtoMessageHandler, pkgs, bytes int) {
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&owner.batchLastFlushLogNano)
+	if now-last < int64(time.Second) || !atomic.CompareAndSwapInt64(&owner.batchLastFlushLogNano, last, now) {
+		return
+	}
+	remote := ""
+	if owner.channel != nil {
+		remote = owner.channel.IP
+	}
+	wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
 }
 
 func (s *flushShard) armTimer(deadline time.Time) {
@@ -273,16 +287,7 @@ func (s *flushShard) armTimer(deadline time.Time) {
 	if s.timerArmed && !deadline.Before(s.nextDeadline) {
 		return
 	}
-	if s.timerArmed {
-		if !s.timer.Stop() {
-			select {
-			case <-s.timer.C:
-			default:
-			}
-		}
-	}
-	s.timer.Reset(d)
-	s.timerC = s.timer.C
+	s.drainAndResetTimer(d)
 	s.timerArmed = true
 	s.nextDeadline = deadline
 }
@@ -291,9 +296,20 @@ func (s *flushShard) stopTimer() {
 	s.timerArmed = false
 	s.timerC = nil
 	s.nextDeadline = time.Time{}
-	if s.timer == nil {
-		return
+	if s.timer != nil {
+		s.drainTimer()
 	}
+}
+
+func (s *flushShard) drainAndResetTimer(d time.Duration) {
+	if s.timerArmed {
+		s.drainTimer()
+	}
+	s.timer.Reset(d)
+	s.timerC = s.timer.C
+}
+
+func (s *flushShard) drainTimer() {
 	if !s.timer.Stop() {
 		select {
 		case <-s.timer.C:
@@ -352,7 +368,6 @@ func (m *sharedWriteManager) Register(sessionID uint64, session getty.Session, h
 	if m == nil {
 		return nil
 	}
-	shard := m.pickShard(sessionID)
 	ev := writeEvent{
 		kind:      writeEventRegister,
 		sessionID: sessionID,
@@ -360,23 +375,22 @@ func (m *sharedWriteManager) Register(sessionID uint64, session getty.Session, h
 		handler:   handler,
 		owner:     owner,
 	}
-	select {
-	case shard.in <- ev:
-		return nil
-	case <-shard.stop:
-		return fmt.Errorf("shared writer shard stopped")
-	}
+	return m.sendEvent(sessionID, ev)
 }
 
 func (m *sharedWriteManager) Unregister(sessionID uint64) error {
 	if m == nil {
 		return nil
 	}
-	shard := m.pickShard(sessionID)
 	ev := writeEvent{
 		kind:      writeEventUnregister,
 		sessionID: sessionID,
 	}
+	return m.sendEvent(sessionID, ev)
+}
+
+func (m *sharedWriteManager) sendEvent(sessionID uint64, ev writeEvent) error {
+	shard := m.pickShard(sessionID)
 	select {
 	case shard.in <- ev:
 		return nil
@@ -386,24 +400,14 @@ func (m *sharedWriteManager) Unregister(sessionID uint64) error {
 }
 
 func (m *sharedWriteManager) Enqueue(sessionID uint64, p *proto.Proto) error {
-	if m == nil {
-		return fmt.Errorf("shared writer manager nil")
-	}
-	shard := m.pickShard(sessionID)
-	ev := writeEvent{
-		kind:      writeEventEnqueue,
-		sessionID: sessionID,
-		msg:       p,
-	}
-	select {
-	case shard.in <- ev:
-		return nil
-	case <-shard.stop:
-		return fmt.Errorf("shared writer shard stopped")
-	}
+	return m.enqueue(sessionID, p, false)
 }
 
 func (m *sharedWriteManager) TryEnqueue(sessionID uint64, p *proto.Proto) error {
+	return m.enqueue(sessionID, p, true)
+}
+
+func (m *sharedWriteManager) enqueue(sessionID uint64, p *proto.Proto, nonBlocking bool) error {
 	if m == nil {
 		return fmt.Errorf("shared writer manager nil")
 	}
@@ -413,13 +417,21 @@ func (m *sharedWriteManager) TryEnqueue(sessionID uint64, p *proto.Proto) error 
 		sessionID: sessionID,
 		msg:       p,
 	}
+	if nonBlocking {
+		select {
+		case shard.in <- ev:
+			return nil
+		case <-shard.stop:
+			return fmt.Errorf("shared writer shard stopped")
+		default:
+			return errSharedWriterQueueFull
+		}
+	}
 	select {
 	case shard.in <- ev:
 		return nil
 	case <-shard.stop:
 		return fmt.Errorf("shared writer shard stopped")
-	default:
-		return errSharedWriterQueueFull
 	}
 }
 
