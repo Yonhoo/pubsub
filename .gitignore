@@ -1,4 +1,3 @@
-
 _bmad/
 
 _bmad-output/
@@ -7,3 +6,25 @@ _bmad-output/
 
 .claude/
 
+# Compiled binaries (Go output)
+biz-server/biz-server
+biz-server/biz-client
+connect-node/connect-node
+controller-manager/controller-manager
+web/web-server
+push-manager/push-manager
+benchmark/benchmark
+
+# Go test binaries
+*.test
+
+# Log files
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
