@@ -150,7 +150,7 @@ services:
     - 50052:50052
     - 18083:8083
     - 9091:9091
-    - 6070:6060
+    - 6075:6060
     volumes:
     - ./logs/connect-node-1:/app/logs
     depends_on:

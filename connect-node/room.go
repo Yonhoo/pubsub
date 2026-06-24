@@ -65,6 +65,7 @@ func (r *Room) Del(ch *Channel) bool {
 }
 
 // Push push msg to the room, if chan full discard it.
+// 优化：并发推送以提升性能
 func (r *Room) PushMsg(p *protocol.Proto) {
 	r.rLock.RLock()
 	// 如果房间已标记为 drop，不再推送消息
@@ -72,10 +73,21 @@ func (r *Room) PushMsg(p *protocol.Proto) {
 		r.rLock.RUnlock()
 		return
 	}
+
+	// 并发推送到房间内所有用户
+	var wg sync.WaitGroup
 	for ch := r.next; ch != nil; ch = ch.Next {
-		_ = ch.Push(p)
+		wg.Add(1)
+		ch := ch // 捕获循环变量
+		go func() {
+			defer wg.Done()
+			_ = ch.Push(p)
+		}()
 	}
 	r.rLock.RUnlock()
+
+	// 等待所有推送完成
+	wg.Wait()
 }
 
 // Close close the room.

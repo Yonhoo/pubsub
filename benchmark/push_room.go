@@ -72,7 +72,7 @@ func main() {
 		log.Fatalf("❌ JSON 序列化失败: %v", err)
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 35 * time.Second}
 	var ok, fail, total int64
 	startTime := time.Now()
 	stop := time.After(*dur)

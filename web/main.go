@@ -84,7 +84,7 @@ func main() {
 		}
 
 		// 调用 Push-Manager 广播
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		protoMsg := &proto.Proto{

@@ -187,14 +187,17 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 		broadcastClient := &BroadcastClient{
 			serverID:      nodeID,
 			client:        client,
-			broadcastChan: make(chan *push.BroadcastReq, 1000), // 缓冲队列
+			broadcastChan: make(chan *push.BroadcastReq, 10000), // 增加缓冲队列到 10000
 			conn:          conn,
 			ctx:           ctx,
 			cancel:        cancel,
 		}
 
-		// 启动单个工作协程处理消息（gRPC 内部已有 HTTP/2 多路复用）
-		go broadcastClient.runWorker(0)
+		// 启动多个工作协程处理消息（提升并发能力）
+		workerCount := 10 // 每个 Connect-Node 10 个工作协程
+		for i := 0; i < workerCount; i++ {
+			go broadcastClient.runWorker(uint64(i))
+		}
 
 		comets[nodeID] = broadcastClient
 	}
@@ -216,7 +219,7 @@ func (bc *BroadcastClient) runWorker(workerID uint64) {
 			}
 			// 发送消息到 Connect-Node
 			// 使用 WaitForReady 避免连接未就绪时调用失败
-			ctx, cancel := context.WithTimeout(bc.ctx, 10*time.Second)
+			ctx, cancel := context.WithTimeout(bc.ctx, 30*time.Second)
 
 			startTime := time.Now()
 			_, err := bc.client.Broadcast(ctx, req, grpc.WaitForReady(true))

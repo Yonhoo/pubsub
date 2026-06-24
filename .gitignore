@@ -28,3 +28,5 @@ logs/
 
 # OS
 .DS_Store
+benchmark/bench_client
+benchmark/bench_push
