@@ -30,3 +30,4 @@ logs/
 .DS_Store
 benchmark/bench_client
 benchmark/bench_push
+benchmark/multi_push
