@@ -24,7 +24,7 @@ COPY . .
 WORKDIR /build/push-manager
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o push-manager .
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o push-manager .
 
 # 最终镜像
 FROM alpine:latest

@@ -24,7 +24,7 @@ COPY . .
 WORKDIR /build/connect-node
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o connect-node .
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o connect-node .
 
 # 最终镜像
 FROM alpine:latest
