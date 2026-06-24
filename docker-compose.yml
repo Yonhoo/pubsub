@@ -146,6 +146,9 @@ services:
     - DROP_LOG_FILE=/app/logs/drop.log
     - WEBSOCKET_LOG_FILE=/app/logs/websocket.log
     - CONNECT_NODE_LOG_FILE=/app/logs/connect-node.log
+    - BUCKET_ROUTINE_AMOUNT=256
+    - BUCKET_ROUTINE_SIZE=8192
+    - BUCKET_ROUTINE_BACKPRESSURE_TIMEOUT=2s
     ports:
     - 50052:50052
     - 18083:8083
@@ -186,6 +189,9 @@ services:
     - DROP_LOG_FILE=/app/logs/drop.log
     - WEBSOCKET_LOG_FILE=/app/logs/websocket.log
     - CONNECT_NODE_LOG_FILE=/app/logs/connect-node.log
+    - BUCKET_ROUTINE_AMOUNT=256
+    - BUCKET_ROUTINE_SIZE=8192
+    - BUCKET_ROUTINE_BACKPRESSURE_TIMEOUT=2s
     ports:
     - 50055:50052
     - 18084:8083
@@ -226,6 +232,9 @@ services:
     - DROP_LOG_FILE=/app/logs/drop.log
     - WEBSOCKET_LOG_FILE=/app/logs/websocket.log
     - CONNECT_NODE_LOG_FILE=/app/logs/connect-node.log
+    - BUCKET_ROUTINE_AMOUNT=256
+    - BUCKET_ROUTINE_SIZE=8192
+    - BUCKET_ROUTINE_BACKPRESSURE_TIMEOUT=2s
     ports:
     - 50056:50052
     - 18085:8083
