@@ -72,7 +72,15 @@ func main() {
 		log.Fatalf("❌ JSON 序列化失败: %v", err)
 	}
 
-	client := &http.Client{Timeout: 35 * time.Second}
+	// 复用连接，避免高速率下每请求新建 socket 导致临时端口/TIME_WAIT 耗尽
+	// (默认 MaxIdleConnsPerHost=2，10000 req/s 时会触发 "cannot assign requested address")
+	transport := &http.Transport{
+		MaxIdleConns:        2000,
+		MaxIdleConnsPerHost: 2000,
+		MaxConnsPerHost:     0,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	client := &http.Client{Timeout: 35 * time.Second, Transport: transport}
 	var ok, fail, total int64
 	startTime := time.Now()
 	stop := time.After(*dur)
