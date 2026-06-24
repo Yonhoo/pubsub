@@ -187,14 +187,16 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 		broadcastClient := &BroadcastClient{
 			serverID:      nodeID,
 			client:        client,
-			broadcastChan: make(chan *push.BroadcastReq, 10000), // 增加缓冲队列到 10000
+			broadcastChan: make(chan *push.BroadcastReq, 50000), // 缓冲队列 50000，吸收突发
 			conn:          conn,
 			ctx:           ctx,
 			cancel:        cancel,
 		}
 
 		// 启动多个工作协程处理消息（提升并发能力）
-		workerCount := 10 // 每个 Connect-Node 10 个工作协程
+		// 吞吐 ≈ workerCount / gRPC单次耗时。10 worker 在 ~4800 条/s 饱和，
+		// 提升到 50 以承载 10000+ 条/s（gRPC HTTP/2 多路复用，单连接可并发）
+		workerCount := 50 // 每个 Connect-Node 50 个工作协程
 		for i := 0; i < workerCount; i++ {
 			go broadcastClient.runWorker(uint64(i))
 		}
@@ -222,7 +224,17 @@ func (bc *BroadcastClient) runWorker(workerID uint64) {
 			ctx, cancel := context.WithTimeout(bc.ctx, 30*time.Second)
 
 			startTime := time.Now()
-			_, err := bc.client.Broadcast(ctx, req, grpc.WaitForReady(true))
+			var err error
+			// 优先用 BroadcastRoom（仅触达该房间成员，O(房间人数)），
+			// 避免 Broadcast 全量扫描所有 channel（O(总连接数)）造成吞吐瓶颈。
+			if rid := req.GetProto().GetRoomid(); rid != "" {
+				_, err = bc.client.BroadcastRoom(ctx, &push.BroadcastRoomReq{
+					RoomID: rid,
+					Proto:  req.Proto,
+				}, grpc.WaitForReady(true))
+			} else {
+				_, err = bc.client.Broadcast(ctx, req, grpc.WaitForReady(true))
+			}
 			elapsed := time.Since(startTime)
 			cancel() // 释放资源
 
