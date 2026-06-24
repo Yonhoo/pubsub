@@ -18,6 +18,8 @@ var (
 	globalSignalDropCount int64
 	// 丢弃日志专用 logger
 	dropLogger *log.Logger
+	// PushBytes 在 channel 未装载 bytes-writer 时返回，调用方应回退到 proto 路径
+	errNoBytesPushWriter = errors.New("channel has no bytes push writer")
 )
 
 // InitDropLogger 初始化丢弃日志记录器
@@ -70,6 +72,11 @@ type Channel struct {
 	// serverPushWriter routes server-side pushes directly to shared writer shard.
 	// When nil, fallback to legacy signal-queue path.
 	serverPushWriter func(*protocol.Proto) error
+	// serverPushBytesWriter is the broadcast fast-path: caller has already encoded
+	// the proto once and reuses the same []byte for every recipient (skips
+	// per-session re-encode). Set alongside serverPushWriter; nil means the
+	// channel only accepts proto pushes.
+	serverPushBytesWriter func([]byte) error
 
 	// 统计：本 Channel 的业务 push 丢弃次数
 	pushDropCount int64
@@ -203,7 +210,37 @@ func (c *Channel) SetServerPushWriter(writer func(*protocol.Proto) error) {
 func (c *Channel) ClearServerPushWriter() {
 	c.mutex.Lock()
 	c.serverPushWriter = nil
+	c.serverPushBytesWriter = nil
 	c.mutex.Unlock()
+}
+
+// SetServerPushBytesWriter 装载预编码字节快路径（房间广播用）。
+func (c *Channel) SetServerPushBytesWriter(writer func([]byte) error) {
+	c.mutex.Lock()
+	c.serverPushBytesWriter = writer
+	c.mutex.Unlock()
+}
+
+// PushBytes 投递已编码好的字节帧。若 channel 未装载 bytes-writer，
+// 返回 errNoBytesPushWriter 以便调用方回退到 proto 路径。
+func (c *Channel) PushBytes(data []byte) error {
+	c.mutex.RLock()
+	w := c.serverPushBytesWriter
+	c.mutex.RUnlock()
+	if w == nil {
+		return errNoBytesPushWriter
+	}
+	if err := w(data); err != nil {
+		dropCount := atomic.AddInt64(&c.pushDropCount, 1)
+		atomic.AddInt64(&globalPushDropCount, 1)
+		recordCriticalDrop("push_bytes", sharedWriterDropReason(err))
+		if dropCount%100 == 1 {
+			dropLog("⚠️  [Channel.PushBytes] enqueue failed! Key=%s, Err=%v, DropCount=%d",
+				c.Key, err, dropCount)
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Channel) Ready() *protocol.Proto {

@@ -45,7 +45,11 @@ type writeEvent struct {
 	handler *gettypkg.ProtoPackageHandler
 	owner   *ProtoMessageHandler
 
-	msg *proto.Proto
+	// 二选一：msg 用于普通入队（flush 时按 session 编码）；
+	// data 用于房间广播预编码场景（同一帧已编码好，flush 时直接 append，
+	// 省掉 N 个接收者重复编码同一 proto 的 CPU 开销）。
+	msg  *proto.Proto
+	data []byte
 }
 
 type sharedSessionState struct {
@@ -148,12 +152,23 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 		delete(s.sessions, ev.sessionID)
 	case writeEventEnqueue:
 		st, ok := s.sessions[ev.sessionID]
-		if !ok || ev.msg == nil {
+		if !ok {
 			return
 		}
-		data, err := st.handler.Write(st.session, ev.msg)
-		if err != nil {
-			wsLog("❌ [SharedWriter] encode failed: %v", err)
+		var data []byte
+		switch {
+		case ev.data != nil:
+			// 预编码快路径（房间广播）：直接复用调用方编出的字节，跳过 per-session 重复编码。
+			data = ev.data
+		case ev.msg != nil:
+			// 普通路径：在 flush 时按 session 编码。
+			var err error
+			data, err = st.handler.Write(st.session, ev.msg)
+			if err != nil {
+				wsLog("❌ [SharedWriter] encode failed: %v", err)
+				return
+			}
+		default:
 			return
 		}
 		st.pending = append(st.pending, data)
@@ -407,6 +422,17 @@ func (m *sharedWriteManager) TryEnqueue(sessionID uint64, p *proto.Proto) error 
 	return m.enqueue(sessionID, p, true)
 }
 
+// EnqueuePreEncoded 投递已编码好的字节帧（房间广播的快路径）。
+// 与 Enqueue 走同一分片队列，flush 时直接 append，不再调用 handler.Write。
+// data 不能为空且必须是一帧完整 ProtoPackage 字节流（与 handler.Write 输出一致）。
+func (m *sharedWriteManager) EnqueuePreEncoded(sessionID uint64, data []byte) error {
+	return m.enqueueData(sessionID, data, false)
+}
+
+func (m *sharedWriteManager) TryEnqueuePreEncoded(sessionID uint64, data []byte) error {
+	return m.enqueueData(sessionID, data, true)
+}
+
 func (m *sharedWriteManager) enqueue(sessionID uint64, p *proto.Proto, nonBlocking bool) error {
 	if m == nil {
 		return fmt.Errorf("shared writer manager nil")
@@ -416,6 +442,37 @@ func (m *sharedWriteManager) enqueue(sessionID uint64, p *proto.Proto, nonBlocki
 		kind:      writeEventEnqueue,
 		sessionID: sessionID,
 		msg:       p,
+	}
+	if nonBlocking {
+		select {
+		case shard.in <- ev:
+			return nil
+		case <-shard.stop:
+			return fmt.Errorf("shared writer shard stopped")
+		default:
+			return errSharedWriterQueueFull
+		}
+	}
+	select {
+	case shard.in <- ev:
+		return nil
+	case <-shard.stop:
+		return fmt.Errorf("shared writer shard stopped")
+	}
+}
+
+func (m *sharedWriteManager) enqueueData(sessionID uint64, data []byte, nonBlocking bool) error {
+	if m == nil {
+		return fmt.Errorf("shared writer manager nil")
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("shared writer pre-encoded data empty")
+	}
+	shard := m.pickShard(sessionID)
+	ev := writeEvent{
+		kind:      writeEventEnqueue,
+		sessionID: sessionID,
+		data:      data,
 	}
 	if nonBlocking {
 		select {

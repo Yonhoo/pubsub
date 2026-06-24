@@ -315,6 +315,10 @@ func (h *ProtoMessageHandler) OnOpen(session getty.Session) error {
 			// Keep server-side push non-blocking; drop when shard queue is full.
 			return h.enqueueSharedWrite(p, "broadcast")
 		})
+		// 装载预编码字节快路径，房间广播一次编码、多接收者复用。
+		h.channel.SetServerPushBytesWriter(func(data []byte) error {
+			return h.enqueueSharedWriteBytes(data, "broadcast")
+		})
 	}
 
 	// 启动 dispatchWebsocket 协程处理客户端消息
@@ -684,6 +688,25 @@ func (h *ProtoMessageHandler) enqueueSharedWrite(p *proto.Proto, source string) 
 		return err
 	}
 	if err := h.server.sharedWriter.TryEnqueue(h.writeSessionID, p); err != nil {
+		h.recordSharedWriterEnqueue(source, err)
+		return err
+	}
+	atomic.AddUint64(&h.batchEnqueued, 1)
+	if h.server != nil && h.server.metrics != nil {
+		h.server.metrics.RecordSharedWriterEnqueue(context.Background(), source, "success", "none")
+	}
+	return nil
+}
+
+// enqueueSharedWriteBytes 投递已编码好的字节帧（房间广播快路径）。
+// 与 enqueueSharedWrite 等价的非阻塞语义、统计指标，唯一差别是跳过 per-session 编码。
+func (h *ProtoMessageHandler) enqueueSharedWriteBytes(data []byte, source string) error {
+	if h.server == nil || h.server.sharedWriter == nil || h.writeSessionID == 0 {
+		err := fmt.Errorf("shared writer unavailable")
+		h.recordSharedWriterEnqueue(source, err)
+		return err
+	}
+	if err := h.server.sharedWriter.TryEnqueuePreEncoded(h.writeSessionID, data); err != nil {
 		h.recordSharedWriterEnqueue(source, err)
 		return err
 	}

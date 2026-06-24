@@ -1,10 +1,15 @@
 package main
 
 import (
+	gettypkg "github.com/livekit/psrpc/examples/pubsub/pkg/getty"
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"sync"
 )
+
+// 房间广播预编码器：ProtoPackageHandler 完全无状态（codec.go 验证），
+// 编出的字节对所有接收者相同；这里复用一个全局实例避免每次广播分配。
+var roomBroadcastEncoder = gettypkg.NewProtoPackageHandler()
 
 type Room struct {
 	ID        string
@@ -65,10 +70,9 @@ func (r *Room) Del(ch *Channel) bool {
 }
 
 // Push push msg to the room, if chan full discard it.
-// ch.Push 只是把消息非阻塞入队到已分片(GOMAXPROCS)的 sharedWriter，
-// 真正的批量写出在 shard 后台异步完成。因此这里串行遍历即可，
-// 不能为每个 channel 起 goroutine：5000msg/s×房间人数 会产生海量 goroutine，
-// 调度开销把单核打满（实测 rate=50 时单 node ~95% 单核）。
+// 优化路径：把同一 proto 在循环外编码一次（handler.Write 无 session 依赖），
+// 然后按字节复用给房间内每个接收者，跳过 N 次重复编码。
+// 任何 channel 未装载 bytes-writer 或入队失败，自动回退到 proto 路径。
 func (r *Room) PushMsg(p *protocol.Proto) {
 	r.rLock.RLock()
 	// 如果房间已标记为 drop，不再推送消息
@@ -76,8 +80,23 @@ func (r *Room) PushMsg(p *protocol.Proto) {
 		r.rLock.RUnlock()
 		return
 	}
+
+	// 编码一次（提前完成，避免持锁时间被编码成本拖长）
+	data, err := roomBroadcastEncoder.Write(nil, p)
+	if err != nil {
+		// 编码失败回退到逐 channel 的 proto 路径（其内部会再次尝试编码）
+		for ch := r.next; ch != nil; ch = ch.Next {
+			_ = ch.Push(p)
+		}
+		r.rLock.RUnlock()
+		return
+	}
+
 	for ch := r.next; ch != nil; ch = ch.Next {
-		_ = ch.Push(p)
+		// 优先走预编码字节路径；若 channel 未装载（旧/未升级）则回退到 proto 路径
+		if perr := ch.PushBytes(data); perr == errNoBytesPushWriter {
+			_ = ch.Push(p)
+		}
 	}
 	r.rLock.RUnlock()
 }
