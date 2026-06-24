@@ -35,8 +35,8 @@ const (
 	// 服务前缀
 	ServicePrefix = "/services"
 
-	// TTL
-	DefaultTTL = 10 * time.Second
+	// TTL - 增加到 30 秒以适应 ETCD 在高负载下的延迟
+	DefaultTTL = 30 * time.Second
 
 	// etcd 服务器的地址
 	EtcdAddr = "http://localhost:2379"
@@ -321,10 +321,10 @@ func RegisterEndPointToEtcd(ctx context.Context, serverAddr, serverName string, 
 
 	log.Printf("✅ [RegisterEndPoint] 成功注册: %s -> %s\n", endpointKey, serverAddr)
 
-	// 每隔 5 s 进行一次续约；若 lease 不存在（如 etcd 重启），则重新注册
+	// 每隔 10s 进行一次续约（TTL=30s，留足够的余量）
 	for {
 		select {
-		case <-time.After(5 * time.Second):
+		case <-time.After(10 * time.Second):
 			_, err := etcdClient.KeepAliveOnce(ctx, lease.ID)
 			if err != nil {
 				if strings.Contains(err.Error(), "lease not found") {
