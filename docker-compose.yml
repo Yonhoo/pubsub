@@ -45,16 +45,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-  etcd-1:
+  etcd:
     image: quay.io/coreos/etcd:v3.5.9
-    container_name: pubsub-etcd-1
+    container_name: pubsub-etcd
     environment:
-    - ETCD_NAME=etcd-1
-    - ETCD_ADVERTISE_CLIENT_URLS=http://etcd-1:2379
+    - ETCD_NAME=etcd0
+    - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
     - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
-    - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd-1:2380
+    - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
     - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
-    - ETCD_INITIAL_CLUSTER=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+    - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
     - ETCD_INITIAL_CLUSTER_STATE=new
     - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
     - ETCD_DATA_DIR=/etcd-data
@@ -62,67 +62,7 @@ services:
     - 2379:2379
     - 2380:2380
     volumes:
-    - etcd-1-data:/etcd-data
-    networks:
-    - pubsub-network
-    healthcheck:
-      test:
-      - CMD
-      - etcdctl
-      - --endpoints=http://localhost:2379
-      - endpoint
-      - health
-      interval: 10s
-      timeout: 5s
-      retries: 5
-  etcd-2:
-    image: quay.io/coreos/etcd:v3.5.9
-    container_name: pubsub-etcd-2
-    environment:
-    - ETCD_NAME=etcd-2
-    - ETCD_ADVERTISE_CLIENT_URLS=http://etcd-2:2379
-    - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
-    - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd-2:2380
-    - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
-    - ETCD_INITIAL_CLUSTER=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
-    - ETCD_INITIAL_CLUSTER_STATE=new
-    - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
-    - ETCD_DATA_DIR=/etcd-data
-    ports:
-    - 2479:2379
-    - 2480:2380
-    volumes:
-    - etcd-2-data:/etcd-data
-    networks:
-    - pubsub-network
-    healthcheck:
-      test:
-      - CMD
-      - etcdctl
-      - --endpoints=http://localhost:2379
-      - endpoint
-      - health
-      interval: 10s
-      timeout: 5s
-      retries: 5
-  etcd-3:
-    image: quay.io/coreos/etcd:v3.5.9
-    container_name: pubsub-etcd-3
-    environment:
-    - ETCD_NAME=etcd-3
-    - ETCD_ADVERTISE_CLIENT_URLS=http://etcd-3:2379
-    - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
-    - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd-3:2380
-    - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
-    - ETCD_INITIAL_CLUSTER=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
-    - ETCD_INITIAL_CLUSTER_STATE=new
-    - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
-    - ETCD_DATA_DIR=/etcd-data
-    ports:
-    - 2579:2379
-    - 2580:2380
-    volumes:
-    - etcd-3-data:/etcd-data
+    - etcd-data:/etcd-data
     networks:
     - pubsub-network
     healthcheck:
@@ -161,7 +101,7 @@ services:
     - DB_PASSWORD=pubsub123
     - DB_NAME=pubsub
     - REDIS_ADDR=redis:6379
-    - ETCD_ENDPOINTS=etcd-1:2379,etcd-2:2379,etcd-3:2379
+    - ETCD_ENDPOINTS=etcd:2379
     ports:
     - 50051:50051
     - 9090:9090
@@ -173,10 +113,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      etcd-1: &id001
+      etcd:
         condition: service_healthy
-      etcd-2: *id001
-      etcd-3: *id001
     networks:
     - pubsub-network
     healthcheck:
@@ -204,7 +142,7 @@ services:
     - METRICS_PORT=9091
     - GETTY_PORT=8083
     - CONTROLLER_ADDRESS=controller:50051
-    - ETCD_ENDPOINTS=etcd-1:2379,etcd-2:2379,etcd-3:2379
+    - ETCD_ENDPOINTS=etcd:2379
     - DROP_LOG_FILE=/app/logs/drop.log
     - WEBSOCKET_LOG_FILE=/app/logs/websocket.log
     - CONNECT_NODE_LOG_FILE=/app/logs/connect-node.log
@@ -218,10 +156,8 @@ services:
     depends_on:
       controller:
         condition: service_healthy
-      etcd-1: &id002
+      etcd:
         condition: service_healthy
-      etcd-2: *id002
-      etcd-3: *id002
     networks:
     - pubsub-network
     healthcheck:
@@ -246,7 +182,7 @@ services:
     - METRICS_PORT=9091
     - GETTY_PORT=8083
     - CONTROLLER_ADDRESS=controller:50051
-    - ETCD_ENDPOINTS=etcd-1:2379,etcd-2:2379,etcd-3:2379
+    - ETCD_ENDPOINTS=etcd:2379
     - DROP_LOG_FILE=/app/logs/drop.log
     - WEBSOCKET_LOG_FILE=/app/logs/websocket.log
     - CONNECT_NODE_LOG_FILE=/app/logs/connect-node.log
@@ -260,10 +196,8 @@ services:
     depends_on:
       controller:
         condition: service_healthy
-      etcd-1: &id003
+      etcd:
         condition: service_healthy
-      etcd-2: *id003
-      etcd-3: *id003
     networks:
     - pubsub-network
     healthcheck:
@@ -288,7 +222,7 @@ services:
     - METRICS_PORT=9091
     - GETTY_PORT=8083
     - CONTROLLER_ADDRESS=controller:50051
-    - ETCD_ENDPOINTS=etcd-1:2379,etcd-2:2379,etcd-3:2379
+    - ETCD_ENDPOINTS=etcd:2379
     - DROP_LOG_FILE=/app/logs/drop.log
     - WEBSOCKET_LOG_FILE=/app/logs/websocket.log
     - CONNECT_NODE_LOG_FILE=/app/logs/connect-node.log
@@ -296,16 +230,14 @@ services:
     - 50056:50052
     - 18085:8083
     - 9094:9091
-    - 6072:6060
+    - 6073:6060
     volumes:
     - ./logs/connect-node-3:/app/logs
     depends_on:
       controller:
         condition: service_healthy
-      etcd-1: &id004
+      etcd:
         condition: service_healthy
-      etcd-2: *id004
-      etcd-3: *id004
     networks:
     - pubsub-network
     healthcheck:
@@ -328,7 +260,7 @@ services:
     - GRPC_PORT=50053
     - METRICS_PORT=9093
     - CONFIG_FILE=config.yaml
-    - ETCD_ENDPOINTS=etcd-1:2379,etcd-2:2379,etcd-3:2379
+    - ETCD_ENDPOINTS=etcd:2379
     ports:
     - 50053:50053
     - 9095:9093
@@ -340,10 +272,8 @@ services:
         condition: service_healthy
       connect-node-3:
         condition: service_healthy
-      etcd-1: &id005
+      etcd:
         condition: service_healthy
-      etcd-2: *id005
-      etcd-3: *id005
     networks:
     - pubsub-network
     healthcheck:
@@ -390,6 +320,4 @@ networks:
 volumes:
   mysql-data: null
   redis-data: null
-  etcd-1-data: null
-  etcd-2-data: null
-  etcd-3-data: null
+  etcd-data: null
