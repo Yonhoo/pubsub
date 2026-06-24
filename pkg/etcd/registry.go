@@ -299,8 +299,9 @@ func RegisterEndPointToEtcd(ctx context.Context, serverAddr, serverName string, 
 		return
 	}
 
-	// 创建一个租约，每隔 10s 需要向 etcd 汇报一次心跳，证明当前节点仍然存活
-	var ttl int64 = 10
+	// 创建一个租约：TTL=30s，配合下方 10s 续约间隔，
+	// 即使个别续约请求因 ETCD 高负载延迟，仍有 3 次机会，避免 lease 过期导致节点误下线
+	var ttl int64 = int64(DefaultTTL / time.Second)
 	lease, err := etcdClient.Grant(ctx, ttl)
 	if err != nil {
 		log.Printf("❌ [RegisterEndPoint] 创建租约失败: %v\n", err)
