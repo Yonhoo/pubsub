@@ -45,11 +45,15 @@ type writeEvent struct {
 	handler *gettypkg.ProtoPackageHandler
 	owner   *ProtoMessageHandler
 
-	// 二选一：msg 用于普通入队（flush 时按 session 编码）；
-	// data 用于房间广播预编码场景（同一帧已编码好，flush 时直接 append，
-	// 省掉 N 个接收者重复编码同一 proto 的 CPU 开销）。
-	msg  *proto.Proto
-	data []byte
+	// 三选一：
+	// - msg: 普通入队，flush 时按 session 编码
+	// - data: 单接收者预编码（房间广播 encode-once 的单投模式）
+	// - batchData: 多接收者批量预编码（房间广播 encode-once 的批量模式），
+	//   同一字节帧分发给 map 里的所有 sessionID，减少 chan send 次数从
+	//   O(房间人数) → O(shard数)。sessionID 字段在此模式下无意义。
+	msg       *proto.Proto
+	data      []byte
+	batchData map[uint64][]byte
 }
 
 type sharedSessionState struct {
@@ -151,37 +155,62 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 		s.flushState(st, flushTriggerOther)
 		delete(s.sessions, ev.sessionID)
 	case writeEventEnqueue:
-		st, ok := s.sessions[ev.sessionID]
-		if !ok {
-			return
-		}
-		var data []byte
+		// 三种模式：单 session (msg/data)、批量 sessions (batchData)
 		switch {
-		case ev.data != nil:
-			// 预编码快路径（房间广播）：直接复用调用方编出的字节，跳过 per-session 重复编码。
-			data = ev.data
-		case ev.msg != nil:
-			// 普通路径：在 flush 时按 session 编码。
-			var err error
-			data, err = st.handler.Write(st.session, ev.msg)
-			if err != nil {
-				wsLog("❌ [SharedWriter] encode failed: %v", err)
+		case ev.batchData != nil:
+			// 批量模式：同一字节帧分发给 map 里的所有 sessionID（房间广播 batch-enqueue 优化）
+			for sid, frameData := range ev.batchData {
+				st, ok := s.sessions[sid]
+				if !ok || len(frameData) == 0 {
+					continue
+				}
+				st.pending = append(st.pending, frameData)
+				st.pendingBytes += len(frameData)
+				if len(st.pending) == 1 {
+					st.deadline = time.Now().Add(s.flushInterval)
+					s.armTimer(st.deadline)
+				}
+				switch {
+				case len(st.pending) >= s.batchSize:
+					s.flushState(st, flushTriggerCount)
+				case st.pendingBytes >= s.maxBatchBytes:
+					s.flushState(st, flushTriggerBytes)
+				}
+			}
+		case ev.sessionID > 0:
+			// 单 session 模式（msg 或 data）
+			st, ok := s.sessions[ev.sessionID]
+			if !ok {
 				return
 			}
-		default:
-			return
-		}
-		st.pending = append(st.pending, data)
-		st.pendingBytes += len(data)
-		if len(st.pending) == 1 {
-			st.deadline = time.Now().Add(s.flushInterval)
-			s.armTimer(st.deadline)
-		}
-		switch {
-		case len(st.pending) >= s.batchSize:
-			s.flushState(st, flushTriggerCount)
-		case st.pendingBytes >= s.maxBatchBytes:
-			s.flushState(st, flushTriggerBytes)
+			var data []byte
+			switch {
+			case ev.data != nil:
+				// 预编码快路径（房间广播单投）：直接复用调用方编出的字节，跳过 per-session 重复编码。
+				data = ev.data
+			case ev.msg != nil:
+				// 普通路径：在 flush 时按 session 编码。
+				var err error
+				data, err = st.handler.Write(st.session, ev.msg)
+				if err != nil {
+					wsLog("❌ [SharedWriter] encode failed: %v", err)
+					return
+				}
+			default:
+				return
+			}
+			st.pending = append(st.pending, data)
+			st.pendingBytes += len(data)
+			if len(st.pending) == 1 {
+				st.deadline = time.Now().Add(s.flushInterval)
+				s.armTimer(st.deadline)
+			}
+			switch {
+			case len(st.pending) >= s.batchSize:
+				s.flushState(st, flushTriggerCount)
+			case st.pendingBytes >= s.maxBatchBytes:
+				s.flushState(st, flushTriggerBytes)
+			}
 		}
 	}
 }
@@ -433,6 +462,38 @@ func (m *sharedWriteManager) TryEnqueuePreEncoded(sessionID uint64, data []byte)
 	return m.enqueueData(sessionID, data, true)
 }
 
+// EnqueueBatch 批量投递（房间广播优化）：同一字节帧分发给一个 shard 内的多个 session。
+// 调用方预先把房间内所有接收者按 shard 分组（via pickShard），每组一次 chan send。
+// 相比 100 人房间 100 次 TryEnqueuePreEncoded（100 次 chan send），现在只有 16 次（shard 数量）。
+func (m *sharedWriteManager) EnqueueBatch(shardID int, sessionIDs []uint64, data []byte) error {
+	if m == nil {
+		return fmt.Errorf("shared writer manager nil")
+	}
+	if shardID < 0 || shardID >= len(m.shards) {
+		return fmt.Errorf("invalid shard ID %d", shardID)
+	}
+	if len(sessionIDs) == 0 || len(data) == 0 {
+		return nil
+	}
+	shard := m.shards[shardID]
+	batchData := make(map[uint64][]byte, len(sessionIDs))
+	for _, sid := range sessionIDs {
+		batchData[sid] = data
+	}
+	ev := writeEvent{
+		kind:      writeEventEnqueue,
+		batchData: batchData,
+	}
+	select {
+	case shard.in <- ev:
+		return nil
+	case <-shard.stop:
+		return fmt.Errorf("shared writer shard stopped")
+	default:
+		return errSharedWriterQueueFull
+	}
+}
+
 func (m *sharedWriteManager) enqueue(sessionID uint64, p *proto.Proto, nonBlocking bool) error {
 	if m == nil {
 		return fmt.Errorf("shared writer manager nil")
@@ -495,4 +556,14 @@ func (m *sharedWriteManager) enqueueData(sessionID uint64, data []byte, nonBlock
 func (m *sharedWriteManager) pickShard(sessionID uint64) *flushShard {
 	idx := int(sessionID % m.shardNum)
 	return m.shards[idx]
+}
+
+// PickShardID 返回给定 sessionID 应路由到的 shard 索引（用于批量分组）。
+func (m *sharedWriteManager) PickShardID(sessionID uint64) int {
+	return int(sessionID % m.shardNum)
+}
+
+// ShardCount 返回 shard 总数（用于批量分组时预分配 map）。
+func (m *sharedWriteManager) ShardCount() int {
+	return int(m.shardNum)
 }

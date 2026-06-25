@@ -70,21 +70,20 @@ func (r *Room) Del(ch *Channel) bool {
 }
 
 // Push push msg to the room, if chan full discard it.
-// 优化路径：把同一 proto 在循环外编码一次（handler.Write 无 session 依赖），
-// 然后按字节复用给房间内每个接收者，跳过 N 次重复编码。
-// 任何 channel 未装载 bytes-writer 或入队失败，自动回退到 proto 路径。
+// 优化路径 v1: encode-once（同一 proto 编码一次，所有接收者复用字节）。
+// 优化路径 v2: batch-enqueue（按 shard 分组，一次 chan send 给同一 shard 的所有 session，
+// 从 O(房间人数) chan send → O(shard数) chan send，显著降低 channel 调度开销）。
 func (r *Room) PushMsg(p *protocol.Proto) {
 	r.rLock.RLock()
-	// 如果房间已标记为 drop，不再推送消息
 	if r.drop {
 		r.rLock.RUnlock()
 		return
 	}
 
-	// 编码一次（提前完成，避免持锁时间被编码成本拖长）
+	// 编码一次
 	data, err := roomBroadcastEncoder.Write(nil, p)
 	if err != nil {
-		// 编码失败回退到逐 channel 的 proto 路径（其内部会再次尝试编码）
+		// 编码失败回退到逐 channel 的 proto 路径
 		for ch := r.next; ch != nil; ch = ch.Next {
 			_ = ch.Push(p)
 		}
@@ -92,13 +91,61 @@ func (r *Room) PushMsg(p *protocol.Proto) {
 		return
 	}
 
+	// 逐 channel 投递（仍是串行遍历，但已经是 encode-once + bytes 复用）
 	for ch := r.next; ch != nil; ch = ch.Next {
-		// 优先走预编码字节路径；若 channel 未装载（旧/未升级）则回退到 proto 路径
 		if perr := ch.PushBytes(data); perr == errNoBytesPushWriter {
 			_ = ch.Push(p)
 		}
 	}
 	r.rLock.RUnlock()
+}
+
+// PushMsgBatch 批量入队优化版：编码一次 + 按 shard 分组批量投递，
+// 从 O(房间人数) chan send 降到 O(shard数) chan send。
+// 调用方需提供 sharedWriter 实例，否则回退到 PushMsg。
+func (r *Room) PushMsgBatch(p *protocol.Proto, sw *sharedWriteManager) {
+	if sw == nil {
+		r.PushMsg(p)
+		return
+	}
+
+	r.rLock.RLock()
+	if r.drop {
+		r.rLock.RUnlock()
+		return
+	}
+
+	// 编码一次
+	data, err := roomBroadcastEncoder.Write(nil, p)
+	if err != nil {
+		// 编码失败回退
+		for ch := r.next; ch != nil; ch = ch.Next {
+			_ = ch.Push(p)
+		}
+		r.rLock.RUnlock()
+		return
+	}
+
+	// 按 shard 分组：遍历房间内所有 channel，把 writeSessionID 按其归属 shard 分组
+	shardCount := sw.ShardCount()
+	groups := make([][]uint64, shardCount)
+	for ch := r.next; ch != nil; ch = ch.Next {
+		if ch.writeSessionID == 0 {
+			// 未装载 sharedWriter（旧版或未升级）→ 回退到单投
+			_ = ch.PushBytes(data)
+			continue
+		}
+		shardID := sw.PickShardID(ch.writeSessionID)
+		groups[shardID] = append(groups[shardID], ch.writeSessionID)
+	}
+	r.rLock.RUnlock()
+
+	// 批量投递：每个非空 shard 一次 chan send
+	for shardID, sids := range groups {
+		if len(sids) > 0 {
+			_ = sw.EnqueueBatch(shardID, sids, data)
+		}
+	}
 }
 
 // Close close the room.

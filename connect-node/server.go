@@ -633,7 +633,8 @@ func (s *ConnectNodeServer) roomBroadcastProc(ch chan *push.BroadcastRoomReq) {
 		atomic.AddInt64(&s.roomStarted, 1)
 		for _, bucket := range s.Buckets() {
 			if room := bucket.Room(req.RoomID); room != nil {
-				room.PushMsg(req.Proto)
+				// 批量入队优化：按 shard 分组，减少 chan send 次数从 O(房间人数) → O(shard数)
+				room.PushMsgBatch(req.Proto, s.sharedWriter)
 			}
 		}
 		atomic.AddInt64(&s.roomCompleted, 1)

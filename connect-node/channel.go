@@ -77,6 +77,9 @@ type Channel struct {
 	// per-session re-encode). Set alongside serverPushWriter; nil means the
 	// channel only accepts proto pushes.
 	serverPushBytesWriter func([]byte) error
+	// writeSessionID 是 sharedWriter 用来路由到 shard 的会话 ID；
+	// 由 ProtoMessageHandler.OnOpen 设置，room.PushMsg 批量分组时需要。
+	writeSessionID uint64
 
 	// 统计：本 Channel 的业务 push 丢弃次数
 	pushDropCount int64

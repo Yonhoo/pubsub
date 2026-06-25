@@ -275,7 +275,8 @@ func (b *Bucket) DelRoom(room *Room) {
 
 func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) {
 	if room := b.Room(arg.RoomID); room != nil {
-		room.PushMsg(arg.Proto)
+		// Bucket 无 sharedWriter 引用，PushMsgBatch 会自动回退到 PushMsg
+		room.PushMsgBatch(arg.Proto, nil)
 	} else {
 		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] Room missing: roomID=%s", arg.RoomID)
 	}

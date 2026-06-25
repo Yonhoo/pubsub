@@ -319,6 +319,8 @@ func (h *ProtoMessageHandler) OnOpen(session getty.Session) error {
 		h.channel.SetServerPushBytesWriter(func(data []byte) error {
 			return h.enqueueSharedWriteBytes(data, "broadcast")
 		})
+		// 记录 writeSessionID 到 channel，room.PushMsg 批量分组时需要。
+		h.channel.writeSessionID = h.writeSessionID
 	}
 
 	// 启动 dispatchWebsocket 协程处理客户端消息
