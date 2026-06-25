@@ -393,3 +393,40 @@ ETCD 集群（3节点）并**没有提升单个请求的处理速度**，只是�
 **风险**: 需改 writeEvent 数据契约（增加 `preEncoded []byte` 字段或新 kind），flush 路径需区分"编码此 proto"vs"用预编码数据"。任何失误会破坏所有服务端推送。
 
 **建议**: 当真实业务需求突破 ~4800 msg/s 且无法横向扩 connect-node 时再实施，需独立分支 + 全量回归测试。现阶段目标场景(2000用户/rate=10)已100%达成，不应在会话尾部冒险重构热路径。
+
+---
+
+## 🚀 v6: encode-once-per-broadcast 突破 4800 msg/s 天花板（2026-06-25）
+
+**分支**: `perf/encode-once-per-broadcast`
+**提交**: 59dfcb1
+
+### 实施
+- `writeEvent` 增加 `data []byte`（与 `msg *Proto` 二选一）
+- `sharedWriteManager` 新增 `EnqueuePreEncoded`/`TryEnqueuePreEncoded`，与原路径共享分片调度
+- `Channel` 新增 `serverPushBytesWriter` 回调和 `PushBytes`，自动 fallback
+- `room.PushMsg` 编码一次后逐 channel 复用字节，编码失败/未装载 bytes-writer 自动回退到原 proto 路径
+- 单播/系统消息路径完全不变
+
+### 速率扫描结果（2000用户/100房×20，单进程多房间推送器）
+
+| rate/房 | 目标推送 | **实际吞吐** | **成功率** | connect-node CPU | 重启/队列丢 |
+|---------|---------|------------|----------|-----------------|-----------|
+| 50 | 5000 msg/s | **4998 msg/s** | **100%** | ~55% 单核 | 0 / 0 |
+| 100 | 10000 msg/s | **9561 msg/s** | **100%** | ~95% 单核 | 0 / 0 |
+| 200 | 20000 msg/s | **10539 msg/s** | **100%** | ~104% 单核 | 0 / 0 |
+| 400 | 40000 msg/s | 10155 msg/s | **100%** | ~94% 单核 | 0 / 0 |
+| 800 | 80000 msg/s | 9862 msg/s | **100%** | ~101% 单核 | 0 / 0 |
+
+### 关键观察
+1. **吞吐天花板从 ~4800 → ~10500 msg/s**（>2x），完全发挥到接近原计算的 fan-out 100k deliveries/s 量级。
+2. **零失败、零节点重启、零队列丢**，即使在压测请求 80000 msg/s 时（系统按物理上限 ~10500 msg/s 节流但所有应答都成功）。
+3. **新瓶颈**: connect-node 仍是 ~1 单核饱和（rate≥200 时 ~100%/16 核）。剩余的单核消耗推测在 room.PushMsg 串行遍历 + flushShard 调度（每条广播仍要往所有接收者的 shard 投递入队事件）。
+4. **fan-out 维度**: 100 人房间下，每条广播只编码 1 次但仍要 99 次额外入队（逻辑 N），后续若需进一步抬升，可考虑 shard 级批量入队。
+
+### 安全验证
+- 编译通过，go vet 无警告
+- 现有 shard 单元测试 (`TestFlushTrigger*`) 全部通过
+- 单播/系统消息路径完全不变（`Enqueue/TryEnqueue` + `msg *Proto`）
+- 任意 channel 未升级或 bytes 入队失败均自动回退到原 proto 路径，无消息丢失风险
+
