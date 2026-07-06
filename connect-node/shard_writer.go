@@ -254,17 +254,19 @@ func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 		defer owner.writeTraceEnd()
 	}
 
-	written := 0
-	var writeErr error
+	frames := make([][]byte, 0, len(st.pending))
 	for _, frame := range st.pending {
 		if len(frame) == 0 {
 			continue
 		}
-		if _, err := st.session.WriteBytes(frame); err != nil {
+		frames = append(frames, frame)
+	}
+	written := len(frames)
+	var writeErr error
+	if written > 0 {
+		if _, err := st.session.WriteBytesArray(frames...); err != nil {
 			writeErr = err
-			break
 		}
-		written++
 	}
 	if writeErr != nil {
 		wsLog("❌ [SharedWriter] WriteBytes failed: %v", writeErr)

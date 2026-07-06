@@ -12,6 +12,7 @@ import (
 
 var (
 	errBucketQueueFull = errors.New("bucket routine queue full")
+	errBucketStopped   = errors.New("bucket routine stopped")
 )
 
 type Bucket struct {
@@ -307,29 +308,32 @@ func (b *Bucket) DelRoom(room *Room) {
 	room.Close()
 }
 
-func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) error {
+func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) (err error) {
 	if arg == nil || arg.RoomID == "" || arg.Proto == nil {
 		return nil
 	}
-	// Check if stopped
 	if atomic.LoadUint32(&b.stopped) != 0 {
-		return errBucketQueueFull // or a separate errBucketStopped
+		return errBucketStopped
 	}
-	// Round-robin to worker routines
 	num := atomic.AddUint64(&b.routinesNum, 1) % uint64(len(b.routines))
 	ch := b.routines[num]
 
-	// Non-blocking send to preserve backpressure semantics
+	defer func() {
+		if r := recover(); r != nil {
+			err = errBucketStopped
+		}
+	}()
+
 	select {
 	case ch <- arg:
 		return nil
 	default:
-		// Bucket queue full — record drop but don't block
 		recordCriticalDrop("bucket_room_queue", "queue_full")
 		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] routine queue full: roomID=%s", arg.RoomID)
 		return errBucketQueueFull
 	}
 }
+
 
 // roomproc is the worker loop — reads from routine chan and pushes to room.
 func (b *Bucket) roomproc(ch chan *push.BroadcastRoomReq) {

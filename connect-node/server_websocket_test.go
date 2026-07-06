@@ -252,9 +252,8 @@ func TestJoinRoomSuccessWaitsForControllerBeforeAck(t *testing.T) {
 		t.Fatal("expected JoinRoom to be invoked")
 	}
 
-	shard := h.server.sharedWriter.pickShard(h.writeSessionID)
-	if got := len(shard.in); got != 0 {
-		t.Fatalf("expected no response enqueue before controller reply, got %d", got)
+	if got := len(session.recordedPkgs()); got != 0 {
+		t.Fatalf("expected no direct response write before controller reply, got %d", got)
 	}
 	select {
 	case err := <-done:
@@ -273,15 +272,19 @@ func TestJoinRoomSuccessWaitsForControllerBeforeAck(t *testing.T) {
 		t.Fatal("expected processClientRequest to complete after controller reply")
 	}
 
-	if got := len(shard.in); got != 1 {
-		t.Fatalf("expected one queued response, got %d", got)
+	pkgs := session.recordedPkgs()
+	if got := len(pkgs); got != 1 {
+		t.Fatalf("expected one direct response write, got %d", got)
 	}
-	ev := <-shard.in
-	if ev.msg == nil || ev.msg.Op != 2 || ev.msg.Seq != req.Seq {
-		t.Fatalf("unexpected ack proto: %+v", ev.msg)
+	ack, ok := pkgs[0].(*proto.Proto)
+	if !ok {
+		t.Fatalf("expected direct write proto, got %T", pkgs[0])
+	}
+	if ack.Op != 2 || ack.Seq != req.Seq {
+		t.Fatalf("unexpected ack proto: %+v", ack)
 	}
 	var body ProtoResponse
-	if err := json.Unmarshal(ev.msg.Body, &body); err != nil {
+	if err := json.Unmarshal(ack.Body, &body); err != nil {
 		t.Fatalf("failed to decode response body: %v", err)
 	}
 	if body.Code != 0 {

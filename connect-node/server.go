@@ -727,12 +727,28 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 	atomic.AddInt64(&s.roomStarted, 1)
 
 	fullCount := 0
+	stoppedCount := 0
 	for _, bucket := range s.Buckets() {
 		if err := bucket.BroadcastRoom(req); err != nil {
+			if errors.Is(err, errBucketStopped) {
+				stoppedCount++
+				continue
+			}
 			fullCount++
 		}
 	}
 	atomic.AddInt64(&s.roomCompleted, 1)
+
+	if stoppedCount > 0 {
+		s.queueStateMu.RLock()
+		state := s.queueState
+		s.queueStateMu.RUnlock()
+		if state != queueStateRunning {
+			err := queueStateErr(state)
+			s.recordEnqueueFailure("broadcast_queue", err)
+			return nil, err
+		}
+	}
 
 	// If all buckets' queues are full, fail the request
 	if fullCount > 0 && fullCount == len(s.buckets) {

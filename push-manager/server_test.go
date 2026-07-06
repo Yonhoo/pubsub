@@ -41,7 +41,7 @@ func newTestPushManagerServer(clientCount int, queueSize int) (*PushManagerServe
 		client := &BroadcastClient{
 			serverID:      string(rune('a' + i)),
 			client:        stubCometClient{},
-			broadcastChan: make(chan *broadcastTask, queueSize),
+			broadcastChan: make(chan *push.BroadcastReq, queueSize),
 			ctx:           clientCtx,
 			cancel:        clientCancel,
 		}
@@ -70,17 +70,17 @@ func TestBroadcastToRoomFansOutRoomTaskToEveryConnectNode(t *testing.T) {
 	for _, client := range clients {
 		select {
 		case task := <-client.broadcastChan:
-			if task.roomReq == nil {
-				t.Fatalf("client %s got non-room task: %+v", client.serverID, task)
+			if task == nil || task.Proto == nil {
+				t.Fatalf("client %s got empty task: %+v", client.serverID, task)
 			}
-			if task.roomReq.RoomID != "room-fanout" {
-				t.Fatalf("client %s got room %q", client.serverID, task.roomReq.RoomID)
+			if task.Proto.Roomid != "room-fanout" {
+				t.Fatalf("client %s got room %q", client.serverID, task.Proto.Roomid)
 			}
-			if task.roomReq.Proto != msg {
+			if task.Proto != msg {
 				t.Fatalf("client %s got different proto pointer", client.serverID)
 			}
-			if task.proto != nil {
-				t.Fatalf("client %s should not get legacy broadcast task", client.serverID)
+			if task.ProtoOp != msg.Op {
+				t.Fatalf("client %s got proto op %d", client.serverID, task.ProtoOp)
 			}
 		default:
 			t.Fatalf("client %s did not receive fan-out task", client.serverID)
@@ -98,13 +98,13 @@ func TestLegacyBroadcastWithRoomIDRoutesToRoomFanOut(t *testing.T) {
 	for _, client := range clients {
 		select {
 		case task := <-client.broadcastChan:
-			if task.roomReq == nil {
-				t.Fatalf("client %s got non-room task: %+v", client.serverID, task)
+			if task == nil || task.Proto == nil {
+				t.Fatalf("client %s got empty task: %+v", client.serverID, task)
 			}
-			if task.roomReq.RoomID != "room-legacy" {
-				t.Fatalf("client %s got room %q", client.serverID, task.roomReq.RoomID)
+			if task.Proto.Roomid != "room-legacy" {
+				t.Fatalf("client %s got room %q", client.serverID, task.Proto.Roomid)
 			}
-			if task.roomReq.Proto != msg {
+			if task.Proto != msg {
 				t.Fatalf("client %s got different proto pointer", client.serverID)
 			}
 		default:
@@ -122,17 +122,17 @@ func TestLegacyBroadcastWithoutRoomIDUsesGlobalBroadcastTask(t *testing.T) {
 
 	select {
 	case task := <-clients[0].broadcastChan:
-		if task.proto == nil {
+		if task == nil || task.Proto == nil {
 			t.Fatalf("expected global broadcast task, got %+v", task)
 		}
-		if task.proto.Proto != msg {
+		if task.Proto != msg {
 			t.Fatalf("got different proto pointer")
 		}
-		if task.proto.ProtoOp != msg.Op {
-			t.Fatalf("expected proto op %d, got %d", msg.Op, task.proto.ProtoOp)
+		if task.ProtoOp != msg.Op {
+			t.Fatalf("expected proto op %d, got %d", msg.Op, task.ProtoOp)
 		}
-		if task.roomReq != nil {
-			t.Fatalf("global broadcast should not include room request")
+		if task.Proto.Roomid != "" {
+			t.Fatalf("global broadcast should not include room id, got %q", task.Proto.Roomid)
 		}
 	default:
 		t.Fatal("client did not receive global broadcast task")

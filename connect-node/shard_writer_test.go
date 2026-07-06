@@ -1,8 +1,7 @@
 package main
 
 import (
-	"errors"
-	"net"
+		"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +15,7 @@ import (
 type mockGettySession struct {
 	mu         sync.Mutex
 	writes     [][][]byte
+	pkgWrites  []any
 	record     bool
 	closed     atomic.Bool
 	readTO     time.Duration
@@ -57,8 +57,11 @@ func (m *mockGettySession) RemoveAttribute(key any) {
 	defer m.mu.Unlock()
 	delete(m.attributes, key)
 }
-func (m *mockGettySession) WritePkg(any, time.Duration) (int, int, error) {
-	return 0, 0, errors.New("not implemented")
+func (m *mockGettySession) WritePkg(pkg any, _ time.Duration) (int, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pkgWrites = append(m.pkgWrites, pkg)
+	return 1, 1, nil
 }
 func (m *mockGettySession) WriteBytes(p []byte) (int, error) {
 	return m.WriteBytesArray(p)
@@ -106,6 +109,14 @@ func (m *mockGettySession) writeBatches() [][][]byte {
 	defer m.mu.Unlock()
 	out := make([][][]byte, len(m.writes))
 	copy(out, m.writes)
+	return out
+}
+
+func (m *mockGettySession) recordedPkgs() []any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]any, len(m.pkgWrites))
+	copy(out, m.pkgWrites)
 	return out
 }
 

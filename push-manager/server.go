@@ -304,8 +304,12 @@ func (s *PushManagerServer) Broadcast(ctx context.Context, req *broadcast.BroadC
 func (s *PushManagerServer) BroadcastToRoom(ctx context.Context, req *broadcast.BroadCastRoomReq) (*broadcast.BroadCastRoomReply, error) {
 	// 将 BroadCastRoomReq 转换为 BroadCastReq
 	// 注意：Proto 中已经包含了 RoomID 字段，所以直接使用
+	protoMsg := req.Proto
+	if protoMsg != nil && protoMsg.Roomid == "" {
+		protoMsg.Roomid = req.RoomId
+	}
 	broadcastReq := &broadcast.BroadCastReq{
-		Proto: req.Proto,
+		Proto: protoMsg,
 	}
 
 	s.EnqueueBroadcastMsg(broadcastReq)
