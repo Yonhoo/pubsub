@@ -104,7 +104,7 @@ func newIntegrationServer(client controller.ControllerServiceClient) *ConnectNod
 	server := &ConnectNodeServer{
 		nodeID:                   "node-it",
 		controllerClient:         client,
-		buckets:                  []*Bucket{NewBucket(bucketCfg)},
+		buckets:                  []*Bucket{NewBucket(bucketCfg, nil)},
 		bucketIdx:                1,
 		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
 		leaveRetryDelay:          20 * time.Millisecond,
@@ -116,7 +116,6 @@ func newIntegrationServer(client controller.ControllerServiceClient) *ConnectNod
 	server.sharedWriter = newSharedWriteManager(1, 1, writeBatchMaxBytes, 5*time.Millisecond, 128)
 	server.sharedWriter.Start()
 	server.initLeaveWorkers(1, 64)
-	server.initRoomWorkers(1, 64)
 	return server
 }
 
@@ -474,7 +473,7 @@ func TestIntegrationRealConnectNodeRoomBroadcastThreeNodesHundredClients(t *test
 		server.nodeID = fmt.Sprintf("real-connect-node-%d", i+1)
 		client, endpoint, cleanup := startRealConnectNodeGRPC(t, server)
 		t.Logf("[e2e] real connect-node started node=%s endpoint=%s roomWorkers=%d buckets=%d",
-			server.nodeID, endpoint, server.roomWorkerNum, len(server.buckets))
+			server.nodeID, endpoint, len(server.buckets))
 		servers = append(servers, server)
 		clients = append(clients, client)
 		cleanups = append(cleanups, cleanup)

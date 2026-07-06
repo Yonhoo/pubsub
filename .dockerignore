@@ -51,3 +51,8 @@ temp/
 # OS files
 .DS_Store
 Thumbs.db
+
+logs/
+logs_*/
+benchmark/*.log
+benchmark/*.out

@@ -36,9 +36,9 @@ rpc:
 bucket:
   size: 32
   channel: 10240  # 增加到 10240（原来 1024）
-  room: 1024
+  room: 4096
   routine_amount: 64
-  routine_size: 2048
+  routine_size: 8192
   routine_backpressure_timeout: 200ms
 
 # Protocol 配置
@@ -50,10 +50,10 @@ protocol:
   handshake_timeout: 5s
 
 shared_writer:
-  batch_size: 32
-  max_batch_bytes: 65536
-  flush_interval: 500ms
-  queue_size: 1024
+  batch_size: 64
+  max_batch_bytes: 262144
+  flush_interval: 10ms
+  queue_size: 16384
 
 leave_queue:
   retry_delay: 200ms
@@ -85,8 +85,8 @@ getty:
     tcp_keep_alive: true
     tcp_read_buf_size: 262144
     tcp_write_buf_size: 65536
-    pkg_rq_size: 1024
-    pkg_wq_size: 1024
+    pkg_rq_size: 4096
+    pkg_wq_size: 4096
     # TCP 读写超时（增加超时时间，避免底层超时导致连接关闭）
     tcp_read_timeout: 5m
     tcp_write_timeout: 5m

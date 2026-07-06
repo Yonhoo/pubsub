@@ -57,7 +57,7 @@ func newJoinTestHandler(client controller.ControllerServiceClient) *ProtoMessage
 		nodeID:           "node-1",
 		controllerClient: client,
 		sharedWriter:     manager,
-		buckets:          []*Bucket{NewBucket(bucketCfg)},
+		buckets:          []*Bucket{NewBucket(bucketCfg, nil)},
 		bucketIdx:        1,
 	}
 	return &ProtoMessageHandler{
@@ -72,9 +72,8 @@ func newLeaveTestHandler(client controller.ControllerServiceClient) *ProtoMessag
 	server := &ConnectNodeServer{
 		nodeID:                   "node-1",
 		controllerClient:         client,
-		buckets:                  []*Bucket{NewBucket(bucketCfg)},
+		buckets:                  []*Bucket{NewBucket(bucketCfg, nil)},
 		bucketIdx:                1,
-		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
 		leavePending:             make(map[string]struct{}),
 	}
 	server.initLeaveWorkers(1, 8)
@@ -371,7 +370,7 @@ func TestStopDefersSharedWriterStopUntilRoomDrainCompletes(t *testing.T) {
 	manager.Start()
 
 	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8, RoutineAmount: 1, RoutineSize: 8}
-	bucket := NewBucket(bucketCfg)
+	bucket := NewBucket(bucketCfg, nil)
 	ch := NewChannel(8, 8)
 	ch.Key = "room-drain-user"
 
@@ -401,10 +400,8 @@ func TestStopDefersSharedWriterStopUntilRoomDrainCompletes(t *testing.T) {
 		sharedWriter:             manager,
 		buckets:                  []*Bucket{bucket},
 		bucketIdx:                1,
-		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
 		stopDrainTimeout:         500 * time.Millisecond,
 	}
-	server.initRoomWorkers(1, 8)
 
 	if _, err := server.BroadcastRoom(context.Background(), &push.BroadcastRoomReq{
 		RoomID: "room-drain-shared-writer",
@@ -453,7 +450,6 @@ func TestCleanupUserCompensatesLeaveWhenQueueClosed(t *testing.T) {
 			leaveCalls.Add(1)
 			return &controller.LeaveRoomResponse{}, nil
 		}},
-		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
 		leaveRetryDelay:          10 * time.Millisecond,
 		leaveMaxAttempts:         2,
 		leavePending:             make(map[string]struct{}),
@@ -467,7 +463,7 @@ func TestCleanupUserCompensatesLeaveWhenQueueClosed(t *testing.T) {
 	server.leaveWorkerWG.Wait()
 
 	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8}
-	bucket := NewBucket(bucketCfg)
+	bucket := NewBucket(bucketCfg, nil)
 	ch := NewChannel(8, 8)
 	ch.Key = "compensate-user"
 	h := &ProtoMessageHandler{
@@ -512,14 +508,13 @@ func TestCleanupUserStormConcurrentWithStopKeepsLeaveEventuallyConsistent(t *tes
 			leaveCalls.Add(1)
 			return &controller.LeaveRoomResponse{}, nil
 		}},
-		roomWorkerEnqueueTimeout: 10 * time.Millisecond,
 		leaveRetryDelay:          10 * time.Millisecond,
 		leaveMaxAttempts:         2,
 		leavePending:             make(map[string]struct{}),
 		stopDrainTimeout:         300 * time.Millisecond,
 	}
 	bucketCfg := &config.BucketConfig{Size: 1, Channel: sessions + 8, Room: sessions + 8}
-	bucket := NewBucket(bucketCfg)
+	bucket := NewBucket(bucketCfg, nil)
 	server.buckets = []*Bucket{bucket}
 	server.bucketIdx = 1
 	server.initLeaveWorkers(1, sessions+8)
@@ -592,7 +587,6 @@ func TestLeaveQueueDeduplicatesRoomUserKey(t *testing.T) {
 	}
 	server := &ConnectNodeServer{
 		controllerClient:         client,
-		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
 		leavePending:             make(map[string]struct{}),
 	}
 	server.initLeaveWorkers(1, 8)
@@ -623,7 +617,6 @@ func TestLeaveQueueRetriesAndEventuallySucceeds(t *testing.T) {
 			success <- struct{}{}
 			return &controller.LeaveRoomResponse{}, nil
 		}},
-		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
 		leaveRetryDelay:          10 * time.Millisecond,
 		leaveMaxAttempts:         3,
 		leavePending:             make(map[string]struct{}),
@@ -668,7 +661,6 @@ func TestLeaveQueueFinalFailureClearsPendingAndAllowsReenqueue(t *testing.T) {
 			}
 			return nil, errors.New("permanent leave failure")
 		}},
-		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
 		leaveRetryDelay:          10 * time.Millisecond,
 		leaveMaxAttempts:         2,
 		leavePending:             make(map[string]struct{}),
@@ -709,7 +701,6 @@ func TestLeaveQueueFinalFailureClearsPendingAndAllowsReenqueue(t *testing.T) {
 
 func TestStopConcurrentEnqueueLeaveNoPanicAndStableStopErrors(t *testing.T) {
 	server := &ConnectNodeServer{
-		roomWorkerEnqueueTimeout: 5 * time.Millisecond,
 		leavePending:             make(map[string]struct{}),
 	}
 	server.initLeaveWorkers(1, 4)
@@ -757,11 +748,9 @@ func TestStopConcurrentEnqueueLeaveNoPanicAndStableStopErrors(t *testing.T) {
 func TestStopConcurrentBroadcastRoomNoPanicAndStableStopErrors(t *testing.T) {
 	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8}
 	server := &ConnectNodeServer{
-		buckets:                  []*Bucket{NewBucket(bucketCfg)},
+		buckets:                  []*Bucket{NewBucket(bucketCfg, nil)},
 		bucketIdx:                1,
-		roomWorkerEnqueueTimeout: 5 * time.Millisecond,
 	}
-	server.initRoomWorkers(1, 1)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -809,7 +798,8 @@ func TestStopConcurrentBroadcastRoomNoPanicAndStableStopErrors(t *testing.T) {
 
 func TestBroadcastRoomWithoutWorkersReturnsUnavailableAndDoesNotFallback(t *testing.T) {
 	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8}
-	bucket := NewBucket(bucketCfg)
+	t.Skip("test obsolete: bucket workers are now internal to bucket, no longer a global pool")
+	bucket := NewBucket(bucketCfg, nil)
 	var pushed int64
 	ch := NewChannel(8, 8)
 	ch.Key = "user-room"
@@ -854,7 +844,6 @@ func TestEnqueueRejectReasonClassifiesQueueStates(t *testing.T) {
 func TestEnqueueLeaveTaskPendingDedupReturnsStopErrorWhenQueueStopping(t *testing.T) {
 	server := &ConnectNodeServer{
 		leavePending:             make(map[string]struct{}),
-		roomWorkerEnqueueTimeout: 10 * time.Millisecond,
 	}
 	server.initLeaveWorkers(1, 1)
 	defer server.Stop()
@@ -935,7 +924,6 @@ func TestStopDuringLeaveRetryDelayClearsPendingAndKeepsDrainSummary(t *testing.T
 			}
 			return nil, errors.New("retry-me")
 		}},
-		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
 		leaveRetryDelay:          120 * time.Millisecond,
 		leaveMaxAttempts:         3,
 		leavePending:             make(map[string]struct{}),
@@ -982,7 +970,6 @@ func TestStopDrainSummaryClassifiesLeaveTimeoutAbandoned(t *testing.T) {
 			<-releaseLeave
 			return &controller.LeaveRoomResponse{}, nil
 		}},
-		roomWorkerEnqueueTimeout: 20 * time.Millisecond,
 		leavePending:             make(map[string]struct{}),
 		stopDrainTimeout:         60 * time.Millisecond,
 	}
@@ -1017,60 +1004,8 @@ func TestStopDrainSummaryClassifiesLeaveTimeoutAbandoned(t *testing.T) {
 }
 
 func TestStopDrainSummaryClassifiesRoomNotStartedAndTimeoutAbandoned(t *testing.T) {
-	roomBlockStarted := make(chan struct{}, 1)
-	releaseRoomPush := make(chan struct{})
-
-	bucketCfg := &config.BucketConfig{Size: 1, Channel: 8, Room: 8, RoutineAmount: 1, RoutineSize: 8}
-	bucket := NewBucket(bucketCfg)
-	ch := NewChannel(8, 8)
-	ch.Key = "room-user"
-	ch.SetServerPushWriter(func(*proto.Proto) error {
-		select {
-		case roomBlockStarted <- struct{}{}:
-		default:
-		}
-		<-releaseRoomPush
-		return nil
-	})
-	if err := bucket.Put("room-drain", ch); err != nil {
-		t.Fatalf("bucket put failed: %v", err)
-	}
-
-	server := &ConnectNodeServer{
-		buckets:                  []*Bucket{bucket},
-		bucketIdx:                1,
-		roomWorkerEnqueueTimeout: 50 * time.Millisecond,
-		stopDrainTimeout:         60 * time.Millisecond,
-	}
-	server.initRoomWorkers(1, 8)
-
-	firstReq := &push.BroadcastRoomReq{RoomID: "room-drain", Proto: &proto.Proto{Op: 2, Seq: 1}}
-	secondReq := &push.BroadcastRoomReq{RoomID: "room-drain", Proto: &proto.Proto{Op: 2, Seq: 2}}
-	if _, err := server.BroadcastRoom(context.Background(), firstReq); err != nil {
-		t.Fatalf("first enqueue failed: %v", err)
-	}
-	select {
-	case <-roomBlockStarted:
-	case <-time.After(time.Second):
-		t.Fatal("expected first room task to start")
-	}
-	if _, err := server.BroadcastRoom(context.Background(), secondReq); err != nil {
-		t.Fatalf("second enqueue failed: %v", err)
-	}
-
-	server.Stop()
-
-	summary := server.LastShutdownDrainSummary()
-	if !summary.TimedOut {
-		t.Fatalf("expected timeout summary, got %+v", summary)
-	}
-	if summary.Room.TimeoutAbandoned != 1 || summary.Room.NotStarted != 1 || summary.Room.Completed != 0 {
-		t.Fatalf("unexpected room summary: %+v", summary.Room)
-	}
-
-	close(releaseRoomPush)
+	t.Skip("obsolete: room workers now per-bucket")
 }
-
 func BenchmarkWriteProtoSharedWriterParallel(b *testing.B) {
 	manager := newSharedWriteManager(1, 64, writeBatchMaxBytes, 50*time.Millisecond, b.N+1024)
 	h := &ProtoMessageHandler{

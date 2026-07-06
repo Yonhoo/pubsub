@@ -12,10 +12,12 @@ package main
 // -stat     统计日志文件路径（默认 stat.log，同时输出到控制台）
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/url"
 	"os"
 	"os/signal"
@@ -63,6 +65,8 @@ type BenchmarkClient struct {
 	mu         sync.RWMutex
 	seq        int32
 	seqMu      sync.Mutex
+	joinOnce   sync.Once
+	joinResult chan error
 }
 
 func main() {
@@ -73,6 +77,7 @@ func main() {
 	logFile := flag.String("log", "client.log", "log file path (default client.log)")
 	statFile := flag.String("stat", "stat.log", "statistics log file path (default stat.log)")
 	userPrefix := flag.String("prefix", "user", "user id prefix")
+	maxDelay := flag.Int("maxdelay", 0, "max random delay seconds for join (0=no delay)")
 	flag.Parse()
 
 	// 设置日志输出（同时影响标准 log 和 Getty 库的日志）
@@ -83,7 +88,7 @@ func main() {
 	defer f.Close()
 
 	// 同时输出到控制台和文件
-	logWriter := io.MultiWriter(os.Stdout, f)
+	logWriter := f
 	// 设置标准 log 的输出（这样 Getty 库的 ProtoHandler 日志也会写入文件）
 	log.SetOutput(logWriter)
 	log.Printf("[client] 日志已写入文件: %s (包含 ProtoHandler 编解码日志)", *logFile)
@@ -129,10 +134,15 @@ func main() {
 	// 启动多个用户连接
 	for i := 0; i < *users; i++ {
 		uid := fmt.Sprintf("%s-%06d", *userPrefix, i+1)
-		go startClient(*wsBase, *roomID, uid, uid, &countDown, &aliveCount, *hbMs)
+		go func(userID string) {
+			if *maxDelay > 0 {
+				time.Sleep(time.Duration(rand.Intn(*maxDelay*1000)) * time.Millisecond)
+			}
+			startClient(*wsBase, *roomID, userID, userID, &countDown, &aliveCount, *hbMs)
+		}(uid)
 		// 避免同时创建太多连接，稍微错开
 		if i%100 == 0 && i > 0 {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(1000 * time.Millisecond)
 		}
 	}
 
@@ -167,84 +177,104 @@ func startClient(wsBase, roomID, userID, userName string, countDown, aliveCount 
 	q.Set("room_id", roomID)
 	wsURL.RawQuery = q.Encode()
 
-	client := &BenchmarkClient{
-		userID:     userID,
-		userName:   userName,
-		roomID:     roomID,
-		countDown:  countDown,
-		aliveCount: aliveCount,
-		done:       make(chan struct{}),
-		seq:        1,
-	}
+	retryDelay := time.Second
+	for {
+		client := &BenchmarkClient{
+			userID:     userID,
+			userName:   userName,
+			roomID:     roomID,
+			countDown:  countDown,
+			aliveCount: aliveCount,
+			done:       make(chan struct{}),
+			seq:        1,
+			joinResult: make(chan error, 1),
+		}
 
-	// 创建 Getty WebSocket 客户端
-	wsClient := getty.NewWSClient(
-		getty.WithServerAddress(wsURL.String()),
-		getty.WithConnectionNumber(1),
-	)
+		wsClient := getty.NewWSClient(
+			getty.WithServerAddress(wsURL.String()),
+			getty.WithConnectionNumber(1),
+		)
 
-	// 设置会话回调
-	wsClient.RunEventLoop(func(session getty.Session) error {
-		// 配置 session
-		session.SetName(fmt.Sprintf("bench-client-%s", userID))
-		session.SetMaxMsgLen(1024 * 1024) // 1MB
+		wsClient.RunEventLoop(func(session getty.Session) error {
+			session.SetName(fmt.Sprintf("bench-client-%s", userID))
+			session.SetMaxMsgLen(1024 * 1024)
+			session.SetPkgHandler(gettypkg.NewProtoPackageHandler())
+			session.SetEventListener(client)
+			session.SetReadTimeout(60 * time.Second)
+			session.SetWriteTimeout(60 * time.Second)
+			session.SetCronPeriod(hbMs)
+			session.SetWaitTime(60 * time.Second)
 
-		// 设置 ProtoPackageHandler（处理协议编解码，buffer 通过 server-level sync.Pool 管理）
-		session.SetPkgHandler(gettypkg.NewProtoPackageHandler())
-		session.SetEventListener(client)
-		session.SetReadTimeout(60 * time.Second)
-		session.SetWriteTimeout(60 * time.Second)
-		session.SetCronPeriod(hbMs) // 心跳周期（毫秒）
-		session.SetWaitTime(60 * time.Second)
+			client.mu.Lock()
+			client.session = session
+			client.mu.Unlock()
 
-		client.mu.Lock()
-		client.session = session
-		client.mu.Unlock()
+			return nil
+		})
 
-		return nil
-	})
+		var session getty.Session
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			client.mu.RLock()
+			session = client.session
+			client.mu.RUnlock()
+			if session != nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 
-	// 等待连接建立
-	time.Sleep(2 * time.Second)
+		if session == nil {
+			clientLog("[client %s] connection failed: session not created", userID)
+			sleepJoinRetry(&retryDelay)
+			continue
+		}
 
-	client.mu.RLock()
-	session := client.session
-	client.mu.RUnlock()
+		if err := client.JoinRoom(); err != nil {
+			clientLog("[client %s] join room err: %v", userID, err)
+			session.Close()
+			sleepJoinRetry(&retryDelay)
+			continue
+		}
 
-	if session == nil {
-		clientLog("[client %s] connection failed: session not created", userID)
-		// 重连
+		select {
+		case joinErr := <-client.joinResult:
+			if joinErr != nil {
+				clientLog("[client %s] join room ack err: %v", userID, joinErr)
+				session.Close()
+				sleepJoinRetry(&retryDelay)
+				continue
+			}
+		case <-time.After(15 * time.Second):
+			clientLog("[client %s] join room ack timeout", userID)
+			session.Close()
+			sleepJoinRetry(&retryDelay)
+			continue
+		}
+
+		retryDelay = time.Second
+		atomic.AddInt64(aliveCount, 1)
+		time.Sleep(500 * time.Millisecond)
+		<-client.done
+		atomic.AddInt64(aliveCount, -1)
+		clientLog("[client %s] connection closed, reconnecting...", userID)
 		time.Sleep(time.Second)
-		//go startClient(wsBase, roomID, userID, userName, countDown, aliveCount, hbMs)
-		return
 	}
+}
 
-	// 连接成功，增加在线数
-	atomic.AddInt64(aliveCount, 1)
-	defer atomic.AddInt64(aliveCount, -1) // 断开时减少在线数
-
-	// 发送加入房间请求
-	if err := client.JoinRoom(); err != nil {
-		clientLog("[client %s] join room err: %v", userID, err)
-		session.Close()
-		time.Sleep(time.Second)
-		//go startClient(wsBase, roomID, userID, userName, recv, hbMs)
-		return
+func sleepJoinRetry(delay *time.Duration) {
+	jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
+	time.Sleep(*delay + jitter)
+	if *delay < 30*time.Second {
+		*delay *= 2
+		if *delay > 30*time.Second {
+			*delay = 30 * time.Second
+		}
 	}
-
-	// 等待一下，确保加入房间请求被处理
-	time.Sleep(500 * time.Millisecond)
-
-	// 等待连接关闭
-	<-client.done
-	clientLog("[client %s] connection closed, reconnecting...", userID)
-	time.Sleep(time.Second)
-	//go startClient(wsBase, roomID, userID, userName, recv, hbMs)
 }
 
 // OnOpen Getty 会话打开回调
 func (c *BenchmarkClient) OnOpen(session getty.Session) error {
-	clientLog("[client %s] session opened: %s", c.userID, session.Stat())
 	return nil
 }
 
@@ -256,6 +286,7 @@ func (c *BenchmarkClient) OnError(session getty.Session, err error) {
 // OnClose Getty 会话关闭回调
 func (c *BenchmarkClient) OnClose(session getty.Session) {
 	clientLog("[client %s] session closed", c.userID)
+	c.signalJoinResult(fmt.Errorf("session closed before join ack"))
 	c.closeOnce.Do(func() {
 		close(c.done)
 	})
@@ -280,10 +311,9 @@ func (c *BenchmarkClient) OnMessage(session getty.Session, pkg interface{}) {
 		return
 	}
 
-	// 调试：打印所有收到的消息类型
-	clientLog("[client %s] 📥 received message: op=%d, seq=%d, bodyLen=%d, body=%s",
-		c.userID, protoMsg.Op, protoMsg.Seq, len(protoMsg.Body),
-		string(protoMsg.Body[:min(len(protoMsg.Body), 100)])) // 只打印前100字节
+	if protoMsg.Op == 2 && c.handleJoinResponse(protoMsg) {
+		return
+	}
 
 	// 排除加入房间响应（op=2, body="join room success"）
 	// 只统计真正的广播消息（op=2 且 body 不是 "join room success"）
@@ -292,18 +322,40 @@ func (c *BenchmarkClient) OnMessage(session getty.Session, pkg interface{}) {
 		bodyStr := string(protoMsg.Body)
 		if bodyStr != "join room success" {
 			atomic.AddInt64(c.countDown, 1)
-			clientLog("[client %s] ✅ counted broadcast: countDown=%d",
-				c.userID, atomic.LoadInt64(c.countDown))
-		} else {
-			clientLog("[client %s] 🔗 received join room response (not counted)", c.userID)
 		}
 	} else if protoMsg.Op == 6 {
 		// 心跳响应，不统计
-		clientLog("[client %s] 💓 heartbeat response (not counted)", c.userID)
-	} else {
-		clientLog("[client %s] ℹ️ other message type: op=%d (not counted)",
-			c.userID, protoMsg.Op)
 	}
+}
+
+func (c *BenchmarkClient) signalJoinResult(err error) {
+	c.joinOnce.Do(func() {
+		c.joinResult <- err
+	})
+}
+
+func (c *BenchmarkClient) handleJoinResponse(protoMsg *protocol.Proto) bool {
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Text    string `json:"text"`
+	}
+	if err := json.Unmarshal(protoMsg.Body, &resp); err != nil {
+		return false
+	}
+	if resp.Message == "" && resp.Text == "" && resp.Code == 0 {
+		return false
+	}
+	if resp.Code != 0 {
+		msg := resp.Message
+		if resp.Text != "" {
+			msg = msg + " " + resp.Text
+		}
+		c.signalJoinResult(fmt.Errorf("%s", msg))
+		return true
+	}
+	c.signalJoinResult(nil)
+	return true
 }
 
 func min(a, b int) int {

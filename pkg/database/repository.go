@@ -186,6 +186,22 @@ func (r *Repository) UserJoinRoom(ctx context.Context, userID, userName, roomID,
 		userName = userID
 	}
 
+	if maxUsers <= 0 {
+		room := Room{ID: roomID, Name: roomID, MaxUsers: 0}
+		if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&room).Error; err != nil {
+			return fmt.Errorf("创建房间失败: %w", err)
+		}
+
+		roomUser := RoomUser{
+			UserID: userID, UserName: userName, RoomID: roomID, NodeID: nodeID,
+			IsOnline: true, LeftAt: nil, JoinedAt: nil,
+		}
+		if err := r.db.WithContext(ctx).Omit("joined_at").Create(&roomUser).Error; err != nil {
+			return fmt.Errorf("创建用户房间关系失败 (userID=%s, roomID=%s, nodeID=%s): %w", userID, roomID, nodeID, err)
+		}
+		return nil
+	}
+
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. 幂等创建房间，然后锁住 room 行作为同房间 Join/Leave 的串行点。
 		room := Room{
@@ -270,37 +286,23 @@ func (r *Repository) UserJoinRoom(ctx context.Context, userID, userName, roomID,
 
 // UserLeaveRoom 用户离开房间（直接删除记录）
 func (r *Repository) UserLeaveRoom(ctx context.Context, userID, roomID string) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var room Room
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			First(&room, "id = ?", roomID).Error
-		if err == gorm.ErrRecordNotFound {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("查询房间失败: %w", err)
-		}
+	// 直接删除该用户在该房间的记录:
+	// - 无需事务(两个独立 SQL,失败不影响一致性)
+	// - 无需行锁(leave 不影响房间容量判断)
+	// - 无需 left_at IS NULL 谓词(找到就删)
+	// 这样多个 leave 完全并发,不会被房间行锁串行化
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND room_id = ?", userID, roomID).
+		Delete(&RoomUser{}).Error; err != nil {
+		return fmt.Errorf("删除用户房间关系失败: %w", err)
+	}
 
-		result := tx.
-			Where("user_id = ? AND room_id = ? AND left_at IS NULL", userID, roomID).
-			Delete(&RoomUser{})
-
-		if result.Error != nil {
-			return result.Error
-		}
-
-		if result.RowsAffected == 0 {
-			// 记录可能已经被删除，不视为错误
-			return nil
-		}
-
-		// 戳 updated_at,后台清理用它判断空闲起点
-		if err := tx.Model(&Room{}).Where("id = ?", roomID).
-			Update("updated_at", time.Now()).Error; err != nil {
-			log.Printf("更新 room.updated_at 失败: %v", err)
-		}
-		return nil
-	})
+	// 戳 updated_at,后台清理用它判断空闲起点(失败不影响 leave 本身)
+	if err := r.db.WithContext(ctx).Model(&Room{}).Where("id = ?", roomID).
+		Update("updated_at", time.Now()).Error; err != nil {
+		log.Printf("更新 room.updated_at 失败: %v", err)
+	}
+	return nil
 }
 
 // UpdateUserOnlineStatus 更新用户在线状态

@@ -43,29 +43,47 @@ type ProtoResponse struct {
 	Text    string `json:"text,omitempty"` // 详细文本（可选，用于错误详情或额外信息）
 }
 
-// sendProtoResponse 发送 Proto 响应给客户端
+// sendProtoResponse ?? Proto ???????
 func (h *ProtoMessageHandler) sendProtoResponse(session getty.Session, req *proto.Proto, resp *ProtoResponse) error {
-	// 序列化响应为 JSON
+	return h.sendProtoResponseWithMode(session, req, resp, false)
+}
+
+// sendProtoResponseDirect ??????????? shared writer?
+// JoinRoom ?? ACK ???????????? flush interval ???
+func (h *ProtoMessageHandler) sendProtoResponseDirect(session getty.Session, req *proto.Proto, resp *ProtoResponse) error {
+	return h.sendProtoResponseWithMode(session, req, resp, true)
+}
+
+func (h *ProtoMessageHandler) sendProtoResponseWithMode(session getty.Session, req *proto.Proto, resp *ProtoResponse, direct bool) error {
+	// ?????? JSON
 	bodyBytes, err := json.Marshal(resp)
 	if err != nil {
-		wsLog("❌ [ProtoHandler] 序列化响应失败: %v", err)
-		return fmt.Errorf("序列化响应失败: %w", err)
+		wsLog("? [ProtoHandler] ???????: %v", err)
+		return fmt.Errorf("???????: %w", err)
 	}
 
 	protoResp := &proto.Proto{
 		Ver:    req.Ver,
-		Op:     req.Op + 1, // 回复 op
+		Op:     req.Op + 1,
 		Seq:    req.Seq,
 		Roomid: req.Roomid,
 		Userid: req.Userid,
 		Body:   bodyBytes,
 	}
 
+	if direct {
+		if _, _, err = session.WritePkg(protoResp, 5*time.Second); err != nil {
+			wsLog("? [ProtoHandler] ??????: %v", err)
+			return err
+		}
+		return nil
+	}
+
 	if err = h.writeProto(session, protoResp, "response"); err != nil {
 		if h.isSharedWriterQueueFull(err) {
 			return err
 		}
-		wsLog("❌ [ProtoHandler] 发送响应失败: %v", err)
+		wsLog("? [ProtoHandler] ??????: %v", err)
 		return err
 	}
 	return nil
@@ -504,7 +522,7 @@ func (h *ProtoMessageHandler) processClientRequest(session getty.Session, p *pro
 			successMessage = resp.Message
 		}
 		successResp := newSuccessResponse(successMessage, "成功加入房间")
-		if err := h.sendProtoResponse(session, p, successResp); err != nil {
+		if err := h.sendProtoResponseDirect(session, p, successResp); err != nil {
 			return err
 		}
 		h.markWriteTime()

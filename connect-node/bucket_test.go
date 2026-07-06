@@ -16,7 +16,7 @@ func newTestBucket() *Bucket {
 		Size:    1,
 		Channel: 16,
 		Room:    16,
-	})
+	}, nil) // nil sharedWriter — test mode fallback to PushMsg
 }
 
 func TestDelRoomRemovesRoomFromBucket(t *testing.T) {

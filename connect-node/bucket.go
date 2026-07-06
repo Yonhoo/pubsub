@@ -1,11 +1,17 @@
 package main
 
 import (
+	"errors"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"sync"
+	"sync/atomic"
 	"time"
+)
+
+var (
+	errBucketQueueFull = errors.New("bucket routine queue full")
 )
 
 type Bucket struct {
@@ -21,10 +27,19 @@ type Bucket struct {
 	lastRoomMissLogNano int64
 
 	snapshotPool sync.Pool
+
+	// goim-style worker pool for room broadcast
+	routines    []chan *push.BroadcastRoomReq
+	routinesNum uint64
+	sw          *sharedWriteManager
+	routineWG   sync.WaitGroup
+	stopOnce    sync.Once
+	stopped     uint32 // atomic flag: 1 = stopped
 }
 
-func NewBucket(c *config.BucketConfig) (b *Bucket) {
-
+// NewBucket creates a bucket with N worker routines (goim comet model).
+// Pass the server's sharedWriter for batch-enqueue optimization.
+func NewBucket(c *config.BucketConfig, sw *sharedWriteManager) (b *Bucket) {
 	b = new(Bucket)
 	b.chs = make(map[string]*Channel, c.Channel)
 	b.ipCnts = make(map[string]int32)
@@ -33,6 +48,25 @@ func NewBucket(c *config.BucketConfig) (b *Bucket) {
 	b.snapshotPool.New = func() any {
 		chs := make([]*Channel, 0, c.Channel)
 		return &chs
+	}
+	b.sw = sw
+
+	// Start RoutineAmount worker goroutines
+	routineAmount := c.RoutineAmount
+	if routineAmount == 0 {
+		routineAmount = 32
+	}
+	routineSize := c.RoutineSize
+	if routineSize <= 0 {
+		routineSize = 1024
+	}
+
+	b.routines = make([]chan *push.BroadcastRoomReq, routineAmount)
+	for i := uint64(0); i < routineAmount; i++ {
+		ch := make(chan *push.BroadcastRoomReq, routineSize)
+		b.routines[i] = ch
+		b.routineWG.Add(1)
+		go b.roomproc(ch)
 	}
 	return
 }
@@ -273,13 +307,56 @@ func (b *Bucket) DelRoom(room *Room) {
 	room.Close()
 }
 
-func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) {
-	if room := b.Room(arg.RoomID); room != nil {
-		// Bucket 无 sharedWriter 引用，PushMsgBatch 会自动回退到 PushMsg
-		room.PushMsgBatch(arg.Proto, nil)
-	} else {
-		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] Room missing: roomID=%s", arg.RoomID)
+func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) error {
+	if arg == nil || arg.RoomID == "" || arg.Proto == nil {
+		return nil
 	}
+	// Check if stopped
+	if atomic.LoadUint32(&b.stopped) != 0 {
+		return errBucketQueueFull // or a separate errBucketStopped
+	}
+	// Round-robin to worker routines
+	num := atomic.AddUint64(&b.routinesNum, 1) % uint64(len(b.routines))
+	ch := b.routines[num]
+
+	// Non-blocking send to preserve backpressure semantics
+	select {
+	case ch <- arg:
+		return nil
+	default:
+		// Bucket queue full — record drop but don't block
+		recordCriticalDrop("bucket_room_queue", "queue_full")
+		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] routine queue full: roomID=%s", arg.RoomID)
+		return errBucketQueueFull
+	}
+}
+
+// roomproc is the worker loop — reads from routine chan and pushes to room.
+func (b *Bucket) roomproc(ch chan *push.BroadcastRoomReq) {
+	defer b.routineWG.Done()
+	for arg := range ch {
+		if arg == nil || arg.RoomID == "" || arg.Proto == nil {
+			continue
+		}
+		if room := b.Room(arg.RoomID); room != nil {
+			room.PushMsgBatch(arg.Proto, b.sw)
+		} else {
+			hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] Room missing: roomID=%s", arg.RoomID)
+		}
+	}
+}
+
+// Shutdown stops all worker routines and waits for them to drain.
+func (b *Bucket) Shutdown() {
+	b.stopOnce.Do(func() {
+		atomic.StoreUint32(&b.stopped, 1)
+		for _, ch := range b.routines {
+			if ch != nil {
+				close(ch)
+			}
+		}
+		b.routineWG.Wait()
+	})
 }
 
 func (b *Bucket) Rooms() (res map[string]struct{}) {

@@ -258,6 +258,7 @@ func (s *PushManagerServer) EnqueueBroadcastMsg(req *broadcast.BroadCastReq) {
 		case client.broadcastChan <- &args:
 		default:
 			atomic.AddInt64(&s.queueFullDropCount, 1)
+			log.Printf("[EnqueueBroadcastMsg] ❌ 队列满丢弃 client=%s roomID=%s", client.serverID, args.Proto.Roomid)
 			// 不在此处打日志，避免刷屏；累计值由 main 中 10s 周期 stat 打印
 		}
 	}

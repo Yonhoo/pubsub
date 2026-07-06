@@ -246,7 +246,6 @@ func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 		return
 	}
 
-	pkgs := len(st.pending)
 	bytes := st.pendingBytes
 	owner := st.owner
 
@@ -255,10 +254,22 @@ func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 		defer owner.writeTraceEnd()
 	}
 
-	if _, err := st.session.WriteBytesArray(st.pending...); err != nil {
-		wsLog("❌ [SharedWriter] WriteBytesArray failed: %v", err)
+	written := 0
+	var writeErr error
+	for _, frame := range st.pending {
+		if len(frame) == 0 {
+			continue
+		}
+		if _, err := st.session.WriteBytes(frame); err != nil {
+			writeErr = err
+			break
+		}
+		written++
+	}
+	if writeErr != nil {
+		wsLog("❌ [SharedWriter] WriteBytes failed: %v", writeErr)
 	} else if owner != nil {
-		s.updateOwnerStats(owner, pkgs, bytes, trigger)
+		s.updateOwnerStats(owner, written, bytes, trigger)
 	}
 
 	st.pending = st.pending[:0]

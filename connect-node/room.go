@@ -1,8 +1,8 @@
 package main
 
 import (
-	gettypkg "github.com/livekit/psrpc/examples/pubsub/pkg/getty"
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
+	gettypkg "github.com/livekit/psrpc/examples/pubsub/pkg/getty"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"sync"
 )
@@ -143,7 +143,9 @@ func (r *Room) PushMsgBatch(p *protocol.Proto, sw *sharedWriteManager) {
 	// 批量投递：每个非空 shard 一次 chan send
 	for shardID, sids := range groups {
 		if len(sids) > 0 {
-			_ = sw.EnqueueBatch(shardID, sids, data)
+			if err := sw.EnqueueBatch(shardID, sids, data); err != nil {
+				recordCriticalDrop("shared_writer_batch", sharedWriterDropReason(err))
+			}
 		}
 	}
 }

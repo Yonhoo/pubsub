@@ -62,31 +62,27 @@ type ConnectNodeServer struct {
 	// Shared writer for websocket session flush.
 	sharedWriter *sharedWriteManager
 
-	// Shared room broadcast workers (global pool).
-	roomWorkers              []chan *push.BroadcastRoomReq
-	roomWorkerNum            uint32
-	roomWorkerEnqueueTimeout time.Duration
-	leaveQueue               chan *leaveTask
-	leaveWorkerNum           uint32
-	leaveRetryDelay          time.Duration
-	leaveMaxAttempts         int
-	leavePendingMu           sync.Mutex
-	leavePending             map[string]struct{}
-	queueStateMu             sync.RWMutex
-	queueState               uint32
-	queueRejectLogNano       int64
-	stopDrainTimeout         time.Duration
-	leaveWorkerWG            sync.WaitGroup
-	roomWorkerWG             sync.WaitGroup
-	leaveAccepted            int64
-	leaveStarted             int64
-	leaveCompleted           int64
-	roomAccepted             int64
-	roomStarted              int64
-	roomCompleted            int64
-	shutdownSummaryMu        sync.RWMutex
-	lastShutdownSummary      shutdownDrainSummary
-	stopOnce                 sync.Once
+	// Leave queue for async LeaveRoom RPC calls
+	leaveQueue          chan *leaveTask
+	leaveWorkerNum      uint32
+	leaveRetryDelay     time.Duration
+	leaveMaxAttempts    int
+	leavePendingMu      sync.Mutex
+	leavePending        map[string]struct{}
+	queueStateMu        sync.RWMutex
+	queueState          uint32
+	queueRejectLogNano  int64
+	stopDrainTimeout    time.Duration
+	leaveWorkerWG       sync.WaitGroup
+	leaveAccepted       int64
+	leaveStarted        int64
+	leaveCompleted      int64
+	roomAccepted        int64
+	roomStarted         int64
+	roomCompleted       int64
+	shutdownSummaryMu   sync.RWMutex
+	lastShutdownSummary shutdownDrainSummary
+	stopOnce            sync.Once
 }
 
 const (
@@ -164,28 +160,22 @@ func NewConnectNodeServer(
 		return nil
 	}
 
-	roomWorkerEnqueueTimeout := cfg.Bucket.RoutineBackpressureTimeout
-	if roomWorkerEnqueueTimeout <= 0 {
-		roomWorkerEnqueueTimeout = 200 * time.Millisecond
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &ConnectNodeServer{
-		nodeID:                   nodeID, // 使用确定后的 nodeID
-		nodeAddress:              nodeAddress,
-		config:                   cfg,
-		controllerClient:         controllerClient,
-		metrics:                  metricsCollector,
-		buckets:                  make([]*Bucket, cfg.Bucket.Size),
-		bucketIdx:                uint32(cfg.Bucket.Size),
-		roomWorkerEnqueueTimeout: roomWorkerEnqueueTimeout,
-		leaveRetryDelay:          200 * time.Millisecond,
-		leaveMaxAttempts:         3,
-		leavePending:             make(map[string]struct{}),
-		queueState:               queueStateRunning,
-		stopDrainTimeout:         5 * time.Second,
-		ctx:                      ctx,
-		cancel:                   cancel,
+		nodeID:           nodeID, // 使用确定后的 nodeID
+		nodeAddress:      nodeAddress,
+		config:           cfg,
+		controllerClient: controllerClient,
+		metrics:          metricsCollector,
+		buckets:          make([]*Bucket, cfg.Bucket.Size),
+		bucketIdx:        uint32(cfg.Bucket.Size),
+		leaveRetryDelay:  200 * time.Millisecond,
+		leaveMaxAttempts: 3,
+		leavePending:     make(map[string]struct{}),
+		queueState:       queueStateRunning,
+		stopDrainTimeout: 5 * time.Second,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	sharedWriterCfg := cfg.SharedWriter
@@ -217,9 +207,8 @@ func NewConnectNodeServer(
 	server.sharedWriter.Start()
 
 	for i := 0; i < cfg.Bucket.Size; i++ {
-		server.buckets[i] = NewBucket(cfg.Bucket)
+		server.buckets[i] = NewBucket(cfg.Bucket, server.sharedWriter)
 	}
-	server.initRoomWorkers(cfg.Bucket.RoutineAmount, cfg.Bucket.RoutineSize)
 	server.initLeaveWorkers(cfg.Bucket.RoutineAmount, cfg.Bucket.RoutineSize)
 
 	go server.onlineproc()
@@ -240,7 +229,6 @@ func (s *ConnectNodeServer) Stop() {
 		}
 		s.queueState = queueStateStopping
 		leaveQueue := s.leaveQueue
-		roomWorkers := append([]chan *push.BroadcastRoomReq(nil), s.roomWorkers...)
 		sharedWriter := s.sharedWriter
 		drainTimeout := s.stopDrainTimeout
 		if drainTimeout <= 0 {
@@ -252,11 +240,17 @@ func (s *ConnectNodeServer) Stop() {
 		if leaveQueue != nil {
 			close(leaveQueue)
 		}
-		for _, ch := range roomWorkers {
-			if ch != nil {
-				close(ch)
+
+		// Shutdown all bucket worker routines in background
+		shutdownDone := make(chan struct{})
+		go func() {
+			for _, b := range s.buckets {
+				if b != nil {
+					b.Shutdown()
+				}
 			}
-		}
+			close(shutdownDone)
+		}()
 
 		// 通知后台 goroutine（如 onlineproc）退出
 		if s.cancel != nil {
@@ -266,7 +260,6 @@ func (s *ConnectNodeServer) Stop() {
 		waitDone := make(chan struct{})
 		go func() {
 			s.leaveWorkerWG.Wait()
-			s.roomWorkerWG.Wait()
 			close(waitDone)
 		}()
 		timedOut := false
@@ -275,6 +268,15 @@ func (s *ConnectNodeServer) Stop() {
 		case <-time.After(drainTimeout):
 			timedOut = true
 		}
+
+		// Also wait for bucket shutdown (but respect the same timeout)
+		if !timedOut {
+			select {
+			case <-shutdownDone:
+			case <-time.After(drainTimeout):
+				timedOut = true
+			}
+		}
 		if sharedWriter != nil {
 			sharedWriter.Stop()
 		}
@@ -282,8 +284,6 @@ func (s *ConnectNodeServer) Stop() {
 		s.queueStateMu.Lock()
 		s.leaveQueue = nil
 		s.leaveWorkerNum = 0
-		s.roomWorkers = nil
-		s.roomWorkerNum = 0
 		s.queueState = queueStateStopped
 		s.queueStateMu.Unlock()
 
@@ -301,29 +301,6 @@ func (s *ConnectNodeServer) Stop() {
 			summary.Room.NotStarted,
 		)
 	})
-}
-
-func (s *ConnectNodeServer) initRoomWorkers(workerNum uint64, queueSize int) {
-	if workerNum == 0 {
-		workerNum = 1
-	}
-	if queueSize <= 0 {
-		queueSize = 1024
-	}
-
-	s.roomWorkers = make([]chan *push.BroadcastRoomReq, workerNum)
-	s.roomWorkerNum = uint32(workerNum)
-	s.queueState = queueStateRunning
-	for i := uint64(0); i < workerNum; i++ {
-		ch := make(chan *push.BroadcastRoomReq, queueSize)
-		s.roomWorkers[i] = ch
-		s.roomWorkerWG.Add(1)
-		go s.roomBroadcastProc(ch)
-	}
-}
-
-func leaveDedupKey(roomID, userID string) string {
-	return roomID + ":" + userID
 }
 
 func (s *ConnectNodeServer) initLeaveWorkers(workerNum uint64, queueSize int) {
@@ -415,8 +392,9 @@ func (s *ConnectNodeServer) enqueueLeaveTask(task *leaveTask, markPending bool) 
 		enqueueCtx context.Context
 		cancel     context.CancelFunc
 	)
-	if s.roomWorkerEnqueueTimeout > 0 {
-		enqueueCtx, cancel = context.WithTimeout(context.Background(), s.roomWorkerEnqueueTimeout)
+	leaveEnqueueTimeout := 200 * time.Millisecond
+	if leaveEnqueueTimeout > 0 {
+		enqueueCtx, cancel = context.WithTimeout(context.Background(), leaveEnqueueTimeout)
 		defer cancel()
 	} else {
 		enqueueCtx = context.Background()
@@ -624,21 +602,8 @@ func (s *ConnectNodeServer) serverDone() <-chan struct{} {
 	return s.ctx.Done()
 }
 
-func (s *ConnectNodeServer) roomBroadcastProc(ch chan *push.BroadcastRoomReq) {
-	defer s.roomWorkerWG.Done()
-	for req := range ch {
-		if req == nil || req.Proto == nil || req.RoomID == "" {
-			continue
-		}
-		atomic.AddInt64(&s.roomStarted, 1)
-		for _, bucket := range s.Buckets() {
-			if room := bucket.Room(req.RoomID); room != nil {
-				// 批量入队优化：按 shard 分组，减少 chan send 次数从 O(房间人数) → O(shard数)
-				room.PushMsgBatch(req.Proto, s.sharedWriter)
-			}
-		}
-		atomic.AddInt64(&s.roomCompleted, 1)
-	}
+func leaveDedupKey(roomID, userID string) string {
+	return roomID + ":" + userID
 }
 
 func (s *ConnectNodeServer) Buckets() []*Bucket {
@@ -749,45 +714,32 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 	}
 	s.queueStateMu.RLock()
 	state := s.queueState
-	roomWorkers := s.roomWorkers
-	roomWorkerNum := s.roomWorkerNum
 	if state != queueStateRunning {
 		s.queueStateMu.RUnlock()
 		err := queueStateErr(state)
 		s.recordEnqueueFailure("broadcast_queue", err)
 		return nil, err
 	}
-	if len(roomWorkers) == 0 || roomWorkerNum == 0 {
-		s.queueStateMu.RUnlock()
-		err := status.Error(codes.Unavailable, "room broadcast workers unavailable")
-		s.recordEnqueueFailure("broadcast_queue", err)
-		return nil, err
-	}
+	s.queueStateMu.RUnlock()
 
-	idx := cityhash.CityHash32([]byte(req.RoomID), uint32(len(req.RoomID))) % roomWorkerNum
-	ch := roomWorkers[idx]
+	// goim comet model: fan-out to all buckets (like goim grpc/server.go BroadcastRoom)
+	atomic.AddInt64(&s.roomAccepted, 1)
+	atomic.AddInt64(&s.roomStarted, 1)
 
-	enqueueCtx := ctx
-	if s.roomWorkerEnqueueTimeout > 0 {
-		var cancel context.CancelFunc
-		enqueueCtx, cancel = context.WithTimeout(ctx, s.roomWorkerEnqueueTimeout)
-		defer cancel()
-	}
-
-	select {
-	case ch <- req:
-		s.queueStateMu.RUnlock()
-		atomic.AddInt64(&s.roomAccepted, 1)
-		return &push.BroadcastRoomReply{}, nil
-	case <-enqueueCtx.Done():
-		s.queueStateMu.RUnlock()
-		if errors.Is(enqueueCtx.Err(), context.DeadlineExceeded) {
-			s.recordEnqueueFailure("broadcast_queue", enqueueCtx.Err())
-			return nil, status.Error(codes.ResourceExhausted, "room broadcast queue overloaded")
+	fullCount := 0
+	for _, bucket := range s.Buckets() {
+		if err := bucket.BroadcastRoom(req); err != nil {
+			fullCount++
 		}
-		s.recordEnqueueFailure("broadcast_queue", enqueueCtx.Err())
-		return nil, enqueueCtx.Err()
 	}
+	atomic.AddInt64(&s.roomCompleted, 1)
+
+	// If all buckets' queues are full, fail the request
+	if fullCount > 0 && fullCount == len(s.buckets) {
+		s.recordEnqueueFailure("broadcast_queue", errBucketQueueFull)
+		return nil, status.Error(codes.ResourceExhausted, "all bucket room queues full")
+	}
+	return &push.BroadcastRoomReply{}, nil
 }
 
 func queueStateErr(state uint32) error {

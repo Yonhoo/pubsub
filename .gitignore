@@ -1,9 +1,6 @@
 _bmad/
-
 _bmad-output/
-
 .agents/
-
 .claude/
 
 # Compiled binaries (Go output)
@@ -14,20 +11,49 @@ controller-manager/controller-manager
 web/web-server
 push-manager/push-manager
 benchmark/benchmark
+benchmark/bench_client
+benchmark/bench_push
+benchmark/multi_push
+bench_client
+bench_client_v2
+multi_push
+controller-manager
+connect-node
+push-manager
+web
 
 # Go test binaries
 *.test
 
-# Log files
+# Local benchmark logs and artifacts
 logs/
+**/logs/
+**/logs_*/
 *.log
+*.out
+nohup.out
+pprof_runs/
+.last_*
+.run_*_pid
+benchmark/*.log
+benchmark/*.out
+benchmark/*.bak*
+connect-node/*.bak*
+pkg/database/*.bak*
+push-manager/*.bak*
+docker-compose.yml.bak
+
+# Local analysis notes
+BUCKET_*.md
+COMPLETE_OPTIMIZATION_SUMMARY.md
+FINAL_SUMMARY.md
+SINGLE_ROOM_VS_MULTI_ROOM.md
 
 # IDE
 .idea/
 .vscode/
+*.swp
 
 # OS
 .DS_Store
-benchmark/bench_client
-benchmark/bench_push
-benchmark/multi_push
+Thumbs.db

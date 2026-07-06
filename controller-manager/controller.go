@@ -17,7 +17,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"sync/atomic"
 	"time"
@@ -161,7 +160,7 @@ const userNodeCacheTTL = 5 * time.Minute
 
 // ========== Room Management ==========
 
-// JoinRoom 用户加入房间（使用 MySQL 事务保证一致性）
+// JoinRoom ???????Redis-first ?????? 20k ??? Join ? MySQL ??????
 func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoomRequest) (*controller.JoinRoomResponse, error) {
 	ctx, span := tracing.StartSpan(ctx, "Controller.JoinRoom")
 	defer span.End()
@@ -173,7 +172,6 @@ func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoo
 		tracing.AttrNodeID.String(req.NodeId),
 	)
 
-	// 验证必需字段：参数错误用 grpc InvalidArgument，调用方拿到准确状态码
 	if req.RoomId == "" {
 		return nil, status.Error(codes.InvalidArgument, "room_id is empty")
 	}
@@ -183,102 +181,100 @@ func (s *ControllerServer) JoinRoom(ctx context.Context, req *controller.JoinRoo
 	if req.NodeId == "" {
 		return nil, status.Error(codes.InvalidArgument, "node_id is empty")
 	}
-
-	// 🔥 关键：使用 MySQL 事务保证一致性（支持多 Controller 节点）
-	tracing.AddSpanEvent(ctx, "db_transaction_join_room")
-	err := s.repo.UserJoinRoom(ctx, req.UserId, req.UserName, req.RoomId, req.NodeId, int32(s.config.Room.DefaultMaxUsers))
-	if err != nil {
-		tracing.RecordError(ctx, err)
-		// 用 typed sentinel error 判断房间已满，业务失败返回 nil error + Success=false
-		if errors.Is(err, database.ErrRoomFull) {
-			s.recordAPIRequest(ctx, "JoinRoom", false)
-			return &controller.JoinRoomResponse{
-				Success: false,
-				Message: "房间已满",
-			}, nil
-		}
-		log.Printf("[Controller] 加入房间失败: %v", err)
-		s.recordAPIRequest(ctx, "JoinRoom", false)
-		// 内部错误返回 grpc Internal，调用方可以 retry / 告警
-		return nil, status.Error(codes.Internal, err.Error())
+	if req.UserName == "" {
+		req.UserName = req.UserId
+	}
+	if s.redis == nil {
+		return nil, status.Error(codes.Unavailable, "redis unavailable")
 	}
 
-	// 加入成功后再查一次房间元数据（容量小，数据要准确）
-	roomMeta, _, _ := s.repo.GetRoomWithStats(ctx, req.RoomId)
-
-	// Redis pipeline 合并 HSet + Expire + HLen，减少 RTT
 	key := roomUsersKey(req.RoomId)
+	userNode := userNodeKey(req.UserId)
+	maxUsers := int64(s.config.Room.DefaultMaxUsers)
+	if maxUsers < 0 {
+		maxUsers = 0
+	}
 	userOnlineData := map[string]any{
 		"user_name": req.UserName,
 		"node_id":   req.NodeId,
 		"room_id":   req.RoomId,
 		"timestamp": time.Now().Unix(),
 	}
-
-	var userCount int64
-	if s.redis != nil {
-		data, mErr := json.Marshal(userOnlineData)
-		if mErr != nil {
-			s.recordCacheFailure("marshal", key, mErr)
-		} else {
-			pipe := s.redis.Pipeline()
-			pipe.HSet(ctx, key, req.UserId, data)
-			pipe.Expire(ctx, key, s.config.Room.CacheTTL)
-			// user -> node 反向映射，加速 GetUserNode 热路径
-			pipe.Set(ctx, userNodeKey(req.UserId), req.NodeId+":"+req.RoomId, userNodeCacheTTL)
-			hlen := pipe.HLen(ctx, key)
-			if _, pErr := pipe.Exec(ctx); pErr != nil {
-				s.recordCacheFailure("pipeline_join", key, pErr)
-			} else {
-				userCount = hlen.Val()
-			}
-		}
+	data, mErr := json.Marshal(userOnlineData)
+	if mErr != nil {
+		tracing.RecordError(ctx, mErr)
+		s.recordAPIRequest(ctx, "JoinRoom", false)
+		return nil, status.Error(codes.Internal, mErr.Error())
 	}
 
-	// Redis 不可用或 pipeline 失败时，回退到 DB 计数
-	if userCount == 0 {
-		userCount, _ = s.repo.GetRoomUserCount(ctx, req.RoomId)
+	joinLua := redis.NewScript(`
+local roomKey = KEYS[1]
+local userNodeKey = KEYS[2]
+local userID = ARGV[1]
+local payload = ARGV[2]
+local roomTTL = tonumber(ARGV[3])
+local userNodeTTL = tonumber(ARGV[4])
+local userNodeValue = ARGV[5]
+local maxUsers = tonumber(ARGV[6])
+local exists = redis.call('HEXISTS', roomKey, userID)
+local count = redis.call('HLEN', roomKey)
+if exists == 0 and maxUsers > 0 and count >= maxUsers then
+  return {0, count}
+end
+redis.call('HSET', roomKey, userID, payload)
+if roomTTL > 0 then
+  redis.call('EXPIRE', roomKey, roomTTL)
+end
+if userNodeTTL > 0 then
+  redis.call('SET', userNodeKey, userNodeValue, 'EX', userNodeTTL)
+else
+  redis.call('SET', userNodeKey, userNodeValue)
+end
+count = redis.call('HLEN', roomKey)
+return {1, count}
+`)
+
+	res, err := joinLua.Run(ctx, s.redis, []string{key, userNode}, req.UserId, string(data), int(s.config.Room.CacheTTL/time.Second), int(userNodeCacheTTL/time.Second), req.NodeId+":"+req.RoomId, maxUsers).Result()
+	if err != nil {
+		tracing.RecordError(ctx, err)
+		s.recordCacheFailure("join_eval", key, err)
+		s.recordAPIRequest(ctx, "JoinRoom", false)
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	vals, ok := res.([]any)
+	if !ok || len(vals) < 2 {
+		s.recordAPIRequest(ctx, "JoinRoom", false)
+		return nil, status.Error(codes.Internal, "unexpected redis join result")
+	}
+
+	joined, _ := vals[0].(int64)
+	userCount, _ := vals[1].(int64)
+	if joined == 0 {
+		s.recordAPIRequest(ctx, "JoinRoom", false)
+		return &controller.JoinRoomResponse{Success: false, Message: "????"}, nil
 	}
 
 	tracing.AddSpanAttributes(ctx, tracing.AttrUserCount.Int(int(userCount)))
-
-	// 更新 metrics
 	if s.metrics != nil {
 		s.metrics.SetRoomUserCount(req.RoomId, userCount)
 	}
 	s.recordAPIRequest(ctx, "JoinRoom", true)
-
 	tracing.SetSpanSuccess(ctx)
 
-	// 优先返回 DB 中的真实房间元数据（B-2/B-4），缺失时降级到请求参数
-	roomName := req.RoomId
-	roomDesc := ""
-	maxUsers := int32(s.config.Room.DefaultMaxUsers)
 	createdAt := time.Now().Unix()
-	updatedAt := createdAt
-	if roomMeta != nil {
-		if roomMeta.Name != "" {
-			roomName = roomMeta.Name
-		}
-		roomDesc = roomMeta.Description
-		if roomMeta.MaxUsers > 0 {
-			maxUsers = int32(roomMeta.MaxUsers)
-		}
-		createdAt = roomMeta.CreatedAt.Unix()
-		updatedAt = roomMeta.UpdatedAt.Unix()
-	}
 	return &controller.JoinRoomResponse{
 		Success: true,
-		Message: "加入房间成功",
+		Message: "??????",
 		RoomInfo: &controller.RoomInfo{
 			RoomId: req.RoomId,
 			Metadata: &controller.RoomMetadata{
-				Name:        roomName,
-				Description: roomDesc,
-				MaxUsers:    maxUsers,
+				Name:        req.RoomId,
+				Description: "",
+				MaxUsers:    int32(maxUsers),
 			},
 			CreatedAt: createdAt,
-			UpdatedAt: updatedAt,
+			UpdatedAt: createdAt,
 		},
 	}, nil
 }
