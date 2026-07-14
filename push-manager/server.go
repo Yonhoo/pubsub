@@ -370,7 +370,7 @@ func (s *PushManagerServer) EnqueueKafkaBroadcastMsg(req *broadcast.BroadCastReq
 }
 
 func (s *PushManagerServer) dispatchBroadcastReq(req *broadcast.BroadCastReq) error {
-	if s.kafkaBridge != nil && s.kafkaBridge.Enabled() {
+	if s.kafkaBridge != nil && s.kafkaBridge.ProducerEnabled() {
 		return s.kafkaBridge.Publish(req)
 	}
 	s.EnqueueBroadcastMsg(req)

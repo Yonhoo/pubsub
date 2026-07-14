@@ -39,8 +39,11 @@ import (
 func main() {
 	// 加载配置
 	cfg := loadPushManagerConfig()
+	role := normalizePushManagerRole(cfg.role)
+	needsIngress := role == pushManagerRoleIngress || role == pushManagerRoleAll
+	needsFanout := role == pushManagerRoleJob || role == pushManagerRoleAll
 
-	log.Printf("启动 Push-Manager: %s (端口: %d)", cfg.managerID, cfg.grpcPort)
+	log.Printf("启动 Push-Manager: %s role=%s (端口: %d)", cfg.managerID, role, cfg.grpcPort)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -59,18 +62,22 @@ func main() {
 		log.Fatalf("Metrics 初始化失败: %v", err)
 	}
 
-	// 3️⃣ 注册服务到 ETCD
-	go etcd.RegisterEndPointToEtcd(ctx, fmt.Sprintf("localhost:%d", cfg.grpcPort), "push-manager", cfg.config.ETCD.Endpoints)
-
-	// 等待一小段时间确保注册完成
-	time.Sleep(1 * time.Second)
-
-	// 4️⃣ 初始化 ETCD 服务发现
-	etcdDiscovery, err := etcd.NewServiceDiscovery(cfg.config.ETCD.Endpoints, "connect-node")
-	if err != nil {
-		log.Fatalf("ETCD 初始化失败: %v", err)
+	// 3️⃣ 注册入口服务到 ETCD。job 角色不提供 Broadcast gRPC，不能注册到 push-manager 服务名。
+	if needsIngress {
+		go etcd.RegisterEndPointToEtcd(ctx, fmt.Sprintf("localhost:%d", cfg.grpcPort), "push-manager", cfg.config.ETCD.Endpoints)
+		// 等待一小段时间确保注册完成
+		time.Sleep(1 * time.Second)
 	}
-	defer etcdDiscovery.Close()
+
+	// 4️⃣ 初始化 ETCD 服务发现（job/all 角色需要发现 connect-node）
+	var etcdDiscovery *etcd.ServiceDiscovery
+	if needsFanout {
+		etcdDiscovery, err = etcd.NewServiceDiscovery(cfg.config.ETCD.Endpoints, "connect-node")
+		if err != nil {
+			log.Fatalf("ETCD 初始化失败: %v", err)
+		}
+		defer etcdDiscovery.Close()
+	}
 
 	// 5️⃣ 创建 Push-Manager 服务器
 	pushManager := NewPushManagerServer(
@@ -80,22 +87,31 @@ func main() {
 		cfg.config.ETCD.Endpoints,
 		metricsCollector,
 	)
-	roomBatchCfg := loadRoomBatchAggregatorConfig()
-	roomBatchAggregator := newRoomBatchAggregatorManager(pushManager, roomBatchCfg)
-	if roomBatchAggregator != nil {
-		pushManager.SetRoomBatchAggregator(roomBatchAggregator)
-		defer roomBatchAggregator.Stop()
+	var roomBatchAggregator *roomBatchAggregatorManager
+	if needsFanout {
+		roomBatchCfg := loadRoomBatchAggregatorConfig()
+		roomBatchAggregator = newRoomBatchAggregatorManager(pushManager, roomBatchCfg)
+		if roomBatchAggregator != nil {
+			pushManager.SetRoomBatchAggregator(roomBatchAggregator)
+			defer roomBatchAggregator.Stop()
+		}
+		log.Printf("[RoomBatchAggregator] %s", describeRoomBatchAggregatorConfig(roomBatchCfg))
+	} else {
+		log.Printf("[RoomBatchAggregator] disabled role=%s", role)
 	}
-	log.Printf("[RoomBatchAggregator] %s", describeRoomBatchAggregatorConfig(roomBatchCfg))
 
 	// 6️⃣ 启动 Connect-Node 发现与监听
-	pushManager.WatchConnectNodes(ctx)
+	if needsFanout {
+		pushManager.WatchConnectNodes(ctx)
+		// 等待发现节点
+		time.Sleep(1 * time.Second)
+	}
 
-	// 等待发现节点
-	time.Sleep(1 * time.Second)
-
-	// 6.5: Optional Kafka ingress. RPC writes to Kafka; the local consumer reuses the existing fanout path.
-	kafkaBridge, err := NewKafkaBridge(loadKafkaBridgeConfig(), pushManager)
+	// 6.5: Optional Kafka bridge. ingress writes to Kafka; job consumes and fans out to connect-node.
+	kafkaCfg := loadKafkaBridgeConfig()
+	kafkaCfg.ProduceEnabled = needsIngress
+	kafkaCfg.ConsumeEnabled = needsFanout
+	kafkaBridge, err := NewKafkaBridge(kafkaCfg, pushManager)
 	if err != nil {
 		log.Fatalf("Kafka init failed: %v", err)
 	}
@@ -110,7 +126,11 @@ func main() {
 	// 7️⃣ 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
 
-	broadcast.RegisterPushServerServer(grpcServer, pushManager)
+	if needsIngress {
+		broadcast.RegisterPushServerServer(grpcServer, pushManager)
+	} else {
+		log.Printf("Broadcast gRPC disabled role=%s", role)
+	}
 
 	// 8️⃣ 启动 gRPC Server
 	listen, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.grpcPort))
@@ -139,7 +159,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("Push-Manager 运行中 ID=%s gRPC=:%d metrics=:%d", cfg.managerID, cfg.grpcPort, cfg.metricsPort)
+	log.Printf("Push-Manager 运行中 ID=%s role=%s gRPC=:%d metrics=:%d", cfg.managerID, role, cfg.grpcPort, cfg.metricsPort)
 
 	// 定期打印队列满丢弃数（便于分析丢包来源）
 	go func() {
@@ -183,7 +203,9 @@ func main() {
 	}
 
 	// 等待 watch goroutine 退出（确保 cleanupAllClients 完成）
-	pushManager.watchWG.Wait()
+	if needsFanout {
+		pushManager.watchWG.Wait()
+	}
 
 	log.Printf("Push-Manager 已关闭")
 }
@@ -193,8 +215,15 @@ type PushManagerConfig struct {
 	managerID   string
 	grpcPort    int
 	metricsPort int
+	role        string
 	config      *config.Config
 }
+
+const (
+	pushManagerRoleAll     = "all"
+	pushManagerRoleIngress = "ingress"
+	pushManagerRoleJob     = "job"
+)
 
 // loadPushManagerConfig 加载配置
 func loadPushManagerConfig() *PushManagerConfig {
@@ -204,12 +233,25 @@ func loadPushManagerConfig() *PushManagerConfig {
 	managerID := getEnv("MANAGER_ID", "push-manager-1")
 	grpcPort := getEnvAsInt("GRPC_PORT", 50053)
 	metricsPort := getEnvAsInt("METRICS_PORT", 9093)
+	role := getEnv("PUSH_MANAGER_ROLE", pushManagerRoleAll)
 
 	return &PushManagerConfig{
 		managerID:   managerID,
 		grpcPort:    grpcPort,
 		metricsPort: metricsPort,
+		role:        role,
 		config:      cfg,
+	}
+}
+
+func normalizePushManagerRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case pushManagerRoleIngress:
+		return pushManagerRoleIngress
+	case pushManagerRoleJob:
+		return pushManagerRoleJob
+	default:
+		return pushManagerRoleAll
 	}
 }
 

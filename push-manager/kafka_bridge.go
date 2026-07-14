@@ -15,10 +15,12 @@ import (
 )
 
 type KafkaBridgeConfig struct {
-	Enabled    bool
-	Brokers    []string
-	Topic      string
-	Partitions int32
+	Enabled        bool
+	ProduceEnabled bool
+	ConsumeEnabled bool
+	Brokers        []string
+	Topic          string
+	Partitions     int32
 }
 
 type KafkaBridge struct {
@@ -57,20 +59,31 @@ func NewKafkaBridge(cfg KafkaBridgeConfig, server *PushManagerServer) (*KafkaBri
 		return nil, err
 	}
 
-	producer, err := sarama.NewAsyncProducer(cfg.Brokers, config)
-	if err != nil {
-		return nil, fmt.Errorf("create kafka producer: %w", err)
+	var err error
+	var producer sarama.AsyncProducer
+	if cfg.ProduceEnabled {
+		producer, err = sarama.NewAsyncProducer(cfg.Brokers, config)
+		if err != nil {
+			return nil, fmt.Errorf("create kafka producer: %w", err)
+		}
 	}
-	consumer, err := sarama.NewConsumer(cfg.Brokers, config)
-	if err != nil {
-		producer.Close()
-		return nil, fmt.Errorf("create kafka consumer: %w", err)
+	var consumer sarama.Consumer
+	if cfg.ConsumeEnabled {
+		consumer, err = sarama.NewConsumer(cfg.Brokers, config)
+		if err != nil {
+			if producer != nil {
+				_ = producer.Close()
+			}
+			return nil, fmt.Errorf("create kafka consumer: %w", err)
+		}
 	}
 
 	b := &KafkaBridge{cfg: cfg, producer: producer, consumer: consumer, server: server}
-	b.closeWG.Add(2)
-	go b.drainProducerSuccesses()
-	go b.drainProducerErrors()
+	if producer != nil {
+		b.closeWG.Add(2)
+		go b.drainProducerSuccesses()
+		go b.drainProducerErrors()
+	}
 	return b, nil
 }
 
@@ -92,6 +105,10 @@ func ensureKafkaTopic(brokers []string, topic string, partitions int32, cfg *sar
 }
 
 func (b *KafkaBridge) Start(ctx context.Context) error {
+	if b == nil || !b.cfg.ConsumeEnabled {
+		log.Printf("[KafkaBridge] consumer disabled brokers=%v topic=%s producer=%v", b.cfg.Brokers, b.cfg.Topic, b.cfg.ProduceEnabled)
+		return nil
+	}
 	partitions, err := b.consumer.Partitions(b.cfg.Topic)
 	if err != nil {
 		return fmt.Errorf("get kafka partitions: %w", err)
@@ -109,6 +126,9 @@ func (b *KafkaBridge) Start(ctx context.Context) error {
 }
 
 func (b *KafkaBridge) Publish(req *broadcast.BroadCastReq) error {
+	if b == nil || !b.cfg.ProduceEnabled || b.producer == nil {
+		return errors.New("kafka producer disabled")
+	}
 	if req == nil || req.Proto == nil {
 		return errors.New("nil broadcast request")
 	}
@@ -136,12 +156,20 @@ func (b *KafkaBridge) Close() {
 	if b == nil {
 		return
 	}
-	_ = b.producer.Close()
-	_ = b.consumer.Close()
+	if b.producer != nil {
+		_ = b.producer.Close()
+	}
+	if b.consumer != nil {
+		_ = b.consumer.Close()
+	}
 	b.closeWG.Wait()
 }
 
 func (b *KafkaBridge) Enabled() bool { return b != nil }
+
+func (b *KafkaBridge) ProducerEnabled() bool {
+	return b != nil && b.cfg.ProduceEnabled && b.producer != nil
+}
 
 func (b *KafkaBridge) drainProducerSuccesses() {
 	defer b.closeWG.Done()
