@@ -8,8 +8,6 @@ import (
 	gproto "google.golang.org/protobuf/proto"
 )
 
-const InternalRoomBatchOp int32 = -9001
-
 func Pack(protos []*protocol.Proto) ([]byte, error) {
 	if len(protos) == 0 {
 		return nil, nil

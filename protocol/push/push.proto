@@ -27,6 +27,12 @@ message BroadcastRoomReq {
   protocol.Proto proto = 2;
 }
 
+message BroadcastRoomBatchReq {
+  string roomID = 1;
+  repeated protocol.Proto protos = 2;
+  bytes packedProtos = 3;
+}
+
 message BroadcastRoomReply{}
 
 message RoomsReq{}
@@ -42,6 +48,8 @@ service Comet {
   rpc Broadcast(BroadcastReq) returns (BroadcastReply);
   // BroadcastRoom broadcast to one room
   rpc BroadcastRoom(BroadcastRoomReq) returns (BroadcastRoomReply);
+  // BroadcastRoomBatch broadcasts a pre-aggregated room batch.
+  rpc BroadcastRoomBatch(BroadcastRoomBatchReq) returns (BroadcastRoomReply);
   // Rooms get all rooms
   rpc Rooms(RoomsReq) returns (RoomsReply);
 }

@@ -271,19 +271,14 @@ func (bc *BroadcastClient) sendRoomBatch(batch *roomBroadcastBatch) {
 	ctx, cancel := context.WithTimeout(bc.ctx, 30*time.Second)
 	defer cancel()
 	if len(batch.protos) > 1 {
-		body, err := roombatch.Pack(batch.protos)
+		packed, err := roombatch.Pack(batch.protos)
 		if err != nil {
 			log.Printf("[RoomBatch-%s] pack failed roomID=%s batch=%d err=%v", bc.serverID, batch.roomID, len(batch.protos), err)
 			return
 		}
-		_, err = bc.client.BroadcastRoom(ctx, &push.BroadcastRoomReq{
-			RoomID: batch.roomID,
-			Proto: &protocol.Proto{
-				Ver:    1,
-				Op:     roombatch.InternalRoomBatchOp,
-				Roomid: batch.roomID,
-				Body:   body,
-			},
+		_, err = bc.client.BroadcastRoomBatch(ctx, &push.BroadcastRoomBatchReq{
+			RoomID:       batch.roomID,
+			PackedProtos: packed,
 		}, grpc.WaitForReady(true))
 		if err != nil {
 			log.Printf("[RoomBatch-%s] batch rpc failed roomID=%s batch=%d err=%v", bc.serverID, batch.roomID, len(batch.protos), err)

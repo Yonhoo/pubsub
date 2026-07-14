@@ -24,6 +24,10 @@ func (stubCometClient) BroadcastRoom(context.Context, *push.BroadcastRoomReq, ..
 	return &push.BroadcastRoomReply{}, nil
 }
 
+func (stubCometClient) BroadcastRoomBatch(context.Context, *push.BroadcastRoomBatchReq, ...grpc.CallOption) (*push.BroadcastRoomReply, error) {
+	return &push.BroadcastRoomReply{}, nil
+}
+
 func (stubCometClient) Rooms(context.Context, *push.RoomsReq, ...grpc.CallOption) (*push.RoomsReply, error) {
 	return &push.RoomsReply{}, nil
 }

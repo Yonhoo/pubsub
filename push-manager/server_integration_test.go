@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/livekit/psrpc/examples/pubsub/pkg/roombatch"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/broadcast"
 	protocol "github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
@@ -48,6 +49,25 @@ func (f *fakeConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Bro
 
 	for _, client := range clients {
 		client.count.Add(1)
+	}
+	return &push.BroadcastRoomReply{}, nil
+}
+
+func (f *fakeConnectNodeServer) BroadcastRoomBatch(ctx context.Context, req *push.BroadcastRoomBatchReq) (*push.BroadcastRoomReply, error) {
+	protos := req.Protos
+	if len(req.PackedProtos) > 0 {
+		var err error
+		protos, err = roombatch.Unpack(req.PackedProtos)
+		if err != nil {
+			return nil, err
+		}
+	}
+	f.mu.RLock()
+	clients := append([]*roomClientCounter(nil), f.rooms[req.RoomID]...)
+	f.mu.RUnlock()
+
+	for _, client := range clients {
+		client.count.Add(int32(len(protos)))
 	}
 	return &push.BroadcastRoomReply{}, nil
 }

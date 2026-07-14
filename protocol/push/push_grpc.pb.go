@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Comet_PushMsg_FullMethodName       = "/protocol.Comet/PushMsg"
-	Comet_Broadcast_FullMethodName     = "/protocol.Comet/Broadcast"
-	Comet_BroadcastRoom_FullMethodName = "/protocol.Comet/BroadcastRoom"
-	Comet_Rooms_FullMethodName         = "/protocol.Comet/Rooms"
+	Comet_PushMsg_FullMethodName            = "/protocol.Comet/PushMsg"
+	Comet_Broadcast_FullMethodName          = "/protocol.Comet/Broadcast"
+	Comet_BroadcastRoom_FullMethodName      = "/protocol.Comet/BroadcastRoom"
+	Comet_BroadcastRoomBatch_FullMethodName = "/protocol.Comet/BroadcastRoomBatch"
+	Comet_Rooms_FullMethodName              = "/protocol.Comet/Rooms"
 )
 
 // CometClient is the client API for Comet service.
@@ -35,6 +36,8 @@ type CometClient interface {
 	Broadcast(ctx context.Context, in *BroadcastReq, opts ...grpc.CallOption) (*BroadcastReply, error)
 	// BroadcastRoom broadcast to one room
 	BroadcastRoom(ctx context.Context, in *BroadcastRoomReq, opts ...grpc.CallOption) (*BroadcastRoomReply, error)
+	// BroadcastRoomBatch broadcasts a pre-aggregated room batch.
+	BroadcastRoomBatch(ctx context.Context, in *BroadcastRoomBatchReq, opts ...grpc.CallOption) (*BroadcastRoomReply, error)
 	// Rooms get all rooms
 	Rooms(ctx context.Context, in *RoomsReq, opts ...grpc.CallOption) (*RoomsReply, error)
 }
@@ -77,6 +80,16 @@ func (c *cometClient) BroadcastRoom(ctx context.Context, in *BroadcastRoomReq, o
 	return out, nil
 }
 
+func (c *cometClient) BroadcastRoomBatch(ctx context.Context, in *BroadcastRoomBatchReq, opts ...grpc.CallOption) (*BroadcastRoomReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BroadcastRoomReply)
+	err := c.cc.Invoke(ctx, Comet_BroadcastRoomBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cometClient) Rooms(ctx context.Context, in *RoomsReq, opts ...grpc.CallOption) (*RoomsReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RoomsReply)
@@ -97,6 +110,8 @@ type CometServer interface {
 	Broadcast(context.Context, *BroadcastReq) (*BroadcastReply, error)
 	// BroadcastRoom broadcast to one room
 	BroadcastRoom(context.Context, *BroadcastRoomReq) (*BroadcastRoomReply, error)
+	// BroadcastRoomBatch broadcasts a pre-aggregated room batch.
+	BroadcastRoomBatch(context.Context, *BroadcastRoomBatchReq) (*BroadcastRoomReply, error)
 	// Rooms get all rooms
 	Rooms(context.Context, *RoomsReq) (*RoomsReply, error)
 	mustEmbedUnimplementedCometServer()
@@ -117,6 +132,9 @@ func (UnimplementedCometServer) Broadcast(context.Context, *BroadcastReq) (*Broa
 }
 func (UnimplementedCometServer) BroadcastRoom(context.Context, *BroadcastRoomReq) (*BroadcastRoomReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BroadcastRoom not implemented")
+}
+func (UnimplementedCometServer) BroadcastRoomBatch(context.Context, *BroadcastRoomBatchReq) (*BroadcastRoomReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BroadcastRoomBatch not implemented")
 }
 func (UnimplementedCometServer) Rooms(context.Context, *RoomsReq) (*RoomsReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Rooms not implemented")
@@ -196,6 +214,24 @@ func _Comet_BroadcastRoom_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Comet_BroadcastRoomBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BroadcastRoomBatchReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CometServer).BroadcastRoomBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Comet_BroadcastRoomBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CometServer).BroadcastRoomBatch(ctx, req.(*BroadcastRoomBatchReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Comet_Rooms_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RoomsReq)
 	if err := dec(in); err != nil {
@@ -232,6 +268,10 @@ var Comet_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BroadcastRoom",
 			Handler:    _Comet_BroadcastRoom_Handler,
+		},
+		{
+			MethodName: "BroadcastRoomBatch",
+			Handler:    _Comet_BroadcastRoomBatch_Handler,
 		},
 		{
 			MethodName: "Rooms",

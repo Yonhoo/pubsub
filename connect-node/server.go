@@ -730,28 +730,6 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 	}
 	s.queueStateMu.RUnlock()
 	atomic.AddInt64(&s.roomAccepted, 1)
-	if req.Proto.GetOp() == roombatch.InternalRoomBatchOp {
-		protos, err := roombatch.Unpack(req.Proto.GetBody())
-		if err != nil {
-			s.recordEnqueueFailure("broadcast_queue", err)
-			return nil, status.Error(codes.InvalidArgument, err.Error())
-		}
-		for _, p := range protos {
-			if p != nil && p.Roomid == "" {
-				p.Roomid = req.RoomID
-			}
-		}
-		atomic.AddInt64(&s.roomStarted, 1)
-		err = s.broadcastRoomBatch(req.RoomID, protos)
-		atomic.AddInt64(&s.roomCompleted, 1)
-		if err != nil {
-			if errors.Is(err, errBucketQueueFull) {
-				return nil, status.Error(codes.ResourceExhausted, "all bucket room queues full")
-			}
-			return nil, err
-		}
-		return &push.BroadcastRoomReply{}, nil
-	}
 	if s.roomFanoutAggregator == nil {
 		atomic.AddInt64(&s.roomStarted, 1)
 		err := s.broadcastRoomBatch(req.RoomID, []*protocol.Proto{req.Proto})
@@ -768,6 +746,52 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 		s.recordEnqueueFailure("broadcast_queue", err)
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, status.Error(codes.ResourceExhausted, "room fanout aggregator queue full")
+		}
+		return nil, err
+	}
+	return &push.BroadcastRoomReply{}, nil
+}
+
+func (s *ConnectNodeServer) BroadcastRoomBatch(ctx context.Context, req *push.BroadcastRoomBatchReq) (*push.BroadcastRoomReply, error) {
+	if req == nil || req.RoomID == "" || (len(req.Protos) == 0 && len(req.PackedProtos) == 0) {
+		roomID := ""
+		if req != nil {
+			roomID = req.RoomID
+		}
+		log.Printf("[ConnectNodeServer] invalid batch args: roomID=%s protos=%d", roomID, len(req.GetProtos()))
+		return nil, pkg.ErrBroadCastRoomArg
+	}
+	s.queueStateMu.RLock()
+	state := s.queueState
+	if state != queueStateRunning {
+		s.queueStateMu.RUnlock()
+		err := queueStateErr(state)
+		s.recordEnqueueFailure("broadcast_queue", err)
+		return nil, err
+	}
+	s.queueStateMu.RUnlock()
+
+	protos := req.Protos
+	if len(req.PackedProtos) > 0 {
+		var err error
+		protos, err = roombatch.Unpack(req.PackedProtos)
+		if err != nil {
+			s.recordEnqueueFailure("broadcast_queue", err)
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
+	for _, p := range protos {
+		if p != nil && p.Roomid == "" {
+			p.Roomid = req.RoomID
+		}
+	}
+	atomic.AddInt64(&s.roomAccepted, 1)
+	atomic.AddInt64(&s.roomStarted, 1)
+	err := s.broadcastRoomBatch(req.RoomID, protos)
+	atomic.AddInt64(&s.roomCompleted, 1)
+	if err != nil {
+		if errors.Is(err, errBucketQueueFull) {
+			return nil, status.Error(codes.ResourceExhausted, "all bucket room queues full")
 		}
 		return nil, err
 	}
