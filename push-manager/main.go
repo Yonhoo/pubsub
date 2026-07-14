@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,12 +80,32 @@ func main() {
 		cfg.config.ETCD.Endpoints,
 		metricsCollector,
 	)
+	roomBatchCfg := loadRoomBatchAggregatorConfig()
+	roomBatchAggregator := newRoomBatchAggregatorManager(pushManager, roomBatchCfg)
+	if roomBatchAggregator != nil {
+		pushManager.SetRoomBatchAggregator(roomBatchAggregator)
+		defer roomBatchAggregator.Stop()
+	}
+	log.Printf("[RoomBatchAggregator] %s", describeRoomBatchAggregatorConfig(roomBatchCfg))
 
 	// 6️⃣ 启动 Connect-Node 发现与监听
 	pushManager.WatchConnectNodes(ctx)
 
 	// 等待发现节点
 	time.Sleep(1 * time.Second)
+
+	// 6.5: Optional Kafka ingress. RPC writes to Kafka; the local consumer reuses the existing fanout path.
+	kafkaBridge, err := NewKafkaBridge(loadKafkaBridgeConfig(), pushManager)
+	if err != nil {
+		log.Fatalf("Kafka init failed: %v", err)
+	}
+	if kafkaBridge != nil {
+		pushManager.SetKafkaBridge(kafkaBridge)
+		if err := kafkaBridge.Start(ctx); err != nil {
+			log.Fatalf("Kafka consumer start failed: %v", err)
+		}
+		defer kafkaBridge.Close()
+	}
 
 	// 7️⃣ 创建 gRPC 服务器
 	grpcServer := grpc.NewServer()
@@ -157,6 +178,9 @@ func main() {
 
 	// 取消上下文
 	cancel()
+	if roomBatchAggregator != nil {
+		roomBatchAggregator.Stop()
+	}
 
 	// 等待 watch goroutine 退出（确保 cleanupAllClients 完成）
 	pushManager.watchWG.Wait()
@@ -207,4 +231,46 @@ func getEnvAsInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+func loadKafkaBridgeConfig() KafkaBridgeConfig {
+	enabled := getEnv("PUSH_MANAGER_KAFKA_ENABLED", "") == "1" || getEnv("PUSH_MANAGER_KAFKA_ENABLED", "") == "true"
+	brokers := getEnv("PUSH_MANAGER_KAFKA_BROKERS", "kafka:9092")
+	parts := getEnvAsInt("PUSH_MANAGER_KAFKA_PARTITIONS", 1)
+	return KafkaBridgeConfig{
+		Enabled:    enabled,
+		Brokers:    splitCSV(brokers),
+		Topic:      getEnv("PUSH_MANAGER_KAFKA_TOPIC", "pubsub-broadcast-topic"),
+		Partitions: int32(parts),
+	}
+}
+
+func loadRoomBatchAggregatorConfig() roomBatchAggregatorConfig {
+	enabledValue := getEnv("PUSH_MANAGER_ROOM_BATCH_ENABLED", "1")
+	return roomBatchAggregatorConfig{
+		Enabled:       enabledValue == "1" || strings.EqualFold(enabledValue, "true"),
+		BatchSize:     getEnvAsInt("PUSH_MANAGER_ROOM_BATCH_SIZE", 20),
+		FlushInterval: getEnvAsDuration("PUSH_MANAGER_ROOM_BATCH_FLUSH_INTERVAL", 500*time.Millisecond),
+		QueueSize:     getEnvAsInt("PUSH_MANAGER_ROOM_BATCH_QUEUE_SIZE", 4096),
+	}
+}
+
+func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultValue
+}
+
+func splitCSV(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }

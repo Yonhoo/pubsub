@@ -75,6 +75,41 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+  zookeeper:
+    image: bitnami/zookeeper:3.8
+    container_name: pubsub-zookeeper
+    environment:
+    - ALLOW_ANONYMOUS_LOGIN=yes
+    networks:
+    - pubsub-network
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pgrep -f zookeeper >/dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  kafka:
+    image: bitnami/kafka:3.4
+    container_name: pubsub-kafka
+    environment:
+    - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+    - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+    - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+    - ALLOW_PLAINTEXT_LISTENER=yes
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks:
+    - pubsub-network
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   jaeger:
     image: jaegertracing/all-in-one:latest
     container_name: pubsub-jaeger
@@ -307,6 +342,14 @@ services:
     - METRICS_PORT=9093
     - CONFIG_FILE=config.yaml
     - ETCD_ENDPOINTS=etcd:2379
+    - PUSH_MANAGER_KAFKA_ENABLED=1
+    - PUSH_MANAGER_KAFKA_BROKERS=kafka:9092
+    - PUSH_MANAGER_KAFKA_TOPIC=pubsub-broadcast-topic
+    - PUSH_MANAGER_KAFKA_PARTITIONS=3
+    - PUSH_MANAGER_ROOM_BATCH_ENABLED=1
+    - PUSH_MANAGER_ROOM_BATCH_SIZE=20
+    - PUSH_MANAGER_ROOM_BATCH_FLUSH_INTERVAL=500ms
+    - PUSH_MANAGER_ROOM_BATCH_QUEUE_SIZE=4096
     ports:
     - 50053:50053
     - 9095:9093
@@ -317,6 +360,8 @@ services:
       connect-node-2:
         condition: service_healthy
       connect-node-3:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
       etcd:
         condition: service_healthy

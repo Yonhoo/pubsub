@@ -16,8 +16,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -30,7 +30,10 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/pkg/config"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/etcd"
 	"github.com/livekit/psrpc/examples/pubsub/pkg/metrics"
+	"github.com/livekit/psrpc/examples/pubsub/pkg/roombatch"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/broadcast"
+	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
+	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 )
 
 // BroadcastClient 广播客户端包装
@@ -38,10 +41,16 @@ type BroadcastClient struct {
 	serverID      string
 	client        push.CometClient
 	broadcastChan chan *push.BroadcastReq
+	roomBatchChan chan *roomBroadcastBatch
 	conn          *grpc.ClientConn
 
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+type roomBroadcastBatch struct {
+	roomID string
+	protos []*protocol.Proto
 }
 
 // PushManagerServer Push-Manager 服务器
@@ -66,6 +75,12 @@ type PushManagerServer struct {
 
 	// Metrics
 	metrics *metrics.MetricsCollector
+
+	// Optional Kafka ingress bridge
+	kafkaBridge *KafkaBridge
+
+	// Room-level batch aggregator. This mirrors goim job room batching before fanout.
+	roomBatchAggregator *roomBatchAggregatorManager
 
 	// 上下文控制
 	ctx    context.Context
@@ -188,6 +203,7 @@ func (s *PushManagerServer) createBroadcastClient(instances []string) {
 			serverID:      nodeID,
 			client:        client,
 			broadcastChan: make(chan *push.BroadcastReq, 50000), // 缓冲队列 50000，吸收突发
+			roomBatchChan: make(chan *roomBroadcastBatch, 50000),
 			conn:          conn,
 			ctx:           ctx,
 			cancel:        cancel,
@@ -214,33 +230,76 @@ func (bc *BroadcastClient) runWorker(workerID uint64) {
 		select {
 		case <-bc.ctx.Done():
 			return
+		case batch, ok := <-bc.roomBatchChan:
+			if !ok {
+				return
+			}
+			bc.sendRoomBatch(batch)
 		case req, ok := <-bc.broadcastChan:
 			if !ok {
 				// 通道已关闭
 				return
 			}
-			// 发送消息到 Connect-Node
-			// 使用 WaitForReady 避免连接未就绪时调用失败
-			ctx, cancel := context.WithTimeout(bc.ctx, 30*time.Second)
+			bc.sendBroadcastReq(workerID, req)
+		}
+	}
+}
 
-			startTime := time.Now()
-			var err error
-			// 优先用 BroadcastRoom（仅触达该房间成员，O(房间人数)），
-			// 避免 Broadcast 全量扫描所有 channel（O(总连接数)）造成吞吐瓶颈。
-			if rid := req.GetProto().GetRoomid(); rid != "" {
-				_, err = bc.client.BroadcastRoom(ctx, &push.BroadcastRoomReq{
-					RoomID: rid,
-					Proto:  req.Proto,
-				}, grpc.WaitForReady(true))
-			} else {
-				_, err = bc.client.Broadcast(ctx, req, grpc.WaitForReady(true))
-			}
-			elapsed := time.Since(startTime)
-			cancel() // 释放资源
+func (bc *BroadcastClient) sendBroadcastReq(workerID uint64, req *push.BroadcastReq) {
+	ctx, cancel := context.WithTimeout(bc.ctx, 30*time.Second)
+	startTime := time.Now()
+	var err error
+	if rid := req.GetProto().GetRoomid(); rid != "" {
+		_, err = bc.client.BroadcastRoom(ctx, &push.BroadcastRoomReq{
+			RoomID: rid,
+			Proto:  req.Proto,
+		}, grpc.WaitForReady(true))
+	} else {
+		_, err = bc.client.Broadcast(ctx, req, grpc.WaitForReady(true))
+	}
+	elapsed := time.Since(startTime)
+	cancel()
+	if err != nil {
+		log.Printf("[Worker-%s-%d] 推送消息失败 (耗时: %v): %v", bc.serverID, workerID, elapsed, err)
+	}
+}
 
-			if err != nil {
-				log.Printf("[Worker-%s-%d] 推送消息失败 (耗时: %v): %v", bc.serverID, workerID, elapsed, err)
-			}
+func (bc *BroadcastClient) sendRoomBatch(batch *roomBroadcastBatch) {
+	if batch == nil || batch.roomID == "" || len(batch.protos) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(bc.ctx, 30*time.Second)
+	defer cancel()
+	if len(batch.protos) > 1 {
+		body, err := roombatch.Pack(batch.protos)
+		if err != nil {
+			log.Printf("[RoomBatch-%s] pack failed roomID=%s batch=%d err=%v", bc.serverID, batch.roomID, len(batch.protos), err)
+			return
+		}
+		_, err = bc.client.BroadcastRoom(ctx, &push.BroadcastRoomReq{
+			RoomID: batch.roomID,
+			Proto: &protocol.Proto{
+				Ver:    1,
+				Op:     roombatch.InternalRoomBatchOp,
+				Roomid: batch.roomID,
+				Body:   body,
+			},
+		}, grpc.WaitForReady(true))
+		if err != nil {
+			log.Printf("[RoomBatch-%s] batch rpc failed roomID=%s batch=%d err=%v", bc.serverID, batch.roomID, len(batch.protos), err)
+		}
+		return
+	}
+	for _, p := range batch.protos {
+		if p == nil {
+			continue
+		}
+		if _, err := bc.client.BroadcastRoom(ctx, &push.BroadcastRoomReq{
+			RoomID: batch.roomID,
+			Proto:  p,
+		}, grpc.WaitForReady(true)); err != nil {
+			log.Printf("[RoomBatch-%s] 推送消息失败 roomID=%s batch=%d err=%v", bc.serverID, batch.roomID, len(batch.protos), err)
+			return
 		}
 	}
 }
@@ -264,15 +323,72 @@ func (s *PushManagerServer) EnqueueBroadcastMsg(req *broadcast.BroadCastReq) {
 	}
 }
 
+func (s *PushManagerServer) EnqueueRoomBatch(roomID string, protos []*protocol.Proto) {
+	if roomID == "" || len(protos) == 0 {
+		return
+	}
+	task := &roomBroadcastBatch{roomID: roomID, protos: protos}
+	for _, client := range s.broadCastClientMap {
+		if client.roomBatchChan == nil {
+			for _, p := range protos {
+				select {
+				case client.broadcastChan <- &push.BroadcastReq{Proto: p, ProtoOp: p.GetOp()}:
+				default:
+					atomic.AddInt64(&s.queueFullDropCount, 1)
+				}
+			}
+			continue
+		}
+		select {
+		case client.roomBatchChan <- task:
+		default:
+			atomic.AddInt64(&s.queueFullDropCount, 1)
+			log.Printf("[EnqueueRoomBatch] ❌ 队列满丢弃 client=%s roomID=%s batch=%d", client.serverID, roomID, len(protos))
+		}
+	}
+}
+
 // GetQueueFullDropCount 返回因队列满而丢弃的消息数（用于排查丢包）
 func (s *PushManagerServer) GetQueueFullDropCount() int64 {
 	return atomic.LoadInt64(&s.queueFullDropCount)
+}
+
+func (s *PushManagerServer) SetKafkaBridge(bridge *KafkaBridge) {
+	s.kafkaBridge = bridge
+}
+
+func (s *PushManagerServer) SetRoomBatchAggregator(agg *roomBatchAggregatorManager) {
+	s.roomBatchAggregator = agg
+}
+
+func (s *PushManagerServer) EnqueueKafkaBroadcastMsg(req *broadcast.BroadCastReq) {
+	if s.roomBatchAggregator != nil {
+		if err := s.roomBatchAggregator.Enqueue(req); err == nil {
+			return
+		} else if !errors.Is(err, errRoomBatchAggregatorNoRoom) {
+			atomic.AddInt64(&s.queueFullDropCount, 1)
+			log.Printf("[RoomBatchAggregator] enqueue failed: %v", err)
+			return
+		}
+	}
+	s.EnqueueBroadcastMsg(req)
+}
+
+func (s *PushManagerServer) dispatchBroadcastReq(req *broadcast.BroadCastReq) error {
+	if s.kafkaBridge != nil && s.kafkaBridge.Enabled() {
+		return s.kafkaBridge.Publish(req)
+	}
+	s.EnqueueBroadcastMsg(req)
+	return nil
 }
 
 // Close 关闭客户端
 func (bc *BroadcastClient) Close() {
 	bc.cancel()
 	close(bc.broadcastChan)
+	if bc.roomBatchChan != nil {
+		close(bc.roomBatchChan)
+	}
 
 	if bc.conn != nil {
 		bc.conn.Close()
@@ -291,7 +407,9 @@ func (s *PushManagerServer) cleanupAllClients() {
 
 // Broadcast 实现 PushServer 的 Broadcast 方法
 func (s *PushManagerServer) Broadcast(ctx context.Context, req *broadcast.BroadCastReq) (*broadcast.BroadCastReply, error) {
-	s.EnqueueBroadcastMsg(req)
+	if err := s.dispatchBroadcastReq(req); err != nil {
+		return nil, err
+	}
 
 	return &broadcast.BroadCastReply{
 		Code: "0",
@@ -312,7 +430,9 @@ func (s *PushManagerServer) BroadcastToRoom(ctx context.Context, req *broadcast.
 		Proto: protoMsg,
 	}
 
-	s.EnqueueBroadcastMsg(broadcastReq)
+	if err := s.dispatchBroadcastReq(broadcastReq); err != nil {
+		return nil, err
+	}
 
 	return &broadcast.BroadCastRoomReply{
 		Code: "0",

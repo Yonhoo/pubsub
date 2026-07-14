@@ -19,6 +19,7 @@ import (
 	"errors"
 	getty "github.com/AlexStocks/getty/transport"
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
+	"github.com/livekit/psrpc/examples/pubsub/pkg/roombatch"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/controller"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
@@ -729,6 +730,28 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 	}
 	s.queueStateMu.RUnlock()
 	atomic.AddInt64(&s.roomAccepted, 1)
+	if req.Proto.GetOp() == roombatch.InternalRoomBatchOp {
+		protos, err := roombatch.Unpack(req.Proto.GetBody())
+		if err != nil {
+			s.recordEnqueueFailure("broadcast_queue", err)
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		for _, p := range protos {
+			if p != nil && p.Roomid == "" {
+				p.Roomid = req.RoomID
+			}
+		}
+		atomic.AddInt64(&s.roomStarted, 1)
+		err = s.broadcastRoomBatch(req.RoomID, protos)
+		atomic.AddInt64(&s.roomCompleted, 1)
+		if err != nil {
+			if errors.Is(err, errBucketQueueFull) {
+				return nil, status.Error(codes.ResourceExhausted, "all bucket room queues full")
+			}
+			return nil, err
+		}
+		return &push.BroadcastRoomReply{}, nil
+	}
 	if s.roomFanoutAggregator == nil {
 		atomic.AddInt64(&s.roomStarted, 1)
 		err := s.broadcastRoomBatch(req.RoomID, []*protocol.Proto{req.Proto})

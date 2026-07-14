@@ -16,6 +16,7 @@ JOIN_TIMEOUT=${JOIN_TIMEOUT:-1500}
 MAXDELAY=${MAXDELAY:-600}
 PUSH_DUR=${PUSH_DUR:-30s}
 PUSH_TIMEOUT=${PUSH_TIMEOUT:-60s}
+PUSH_ADDR=${PUSH_ADDR:-[::1]:18086}
 RATES=${RATES:-"10 20 50 100 200"}
 IP1=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' pubsub-connect-node-1)
 IP2=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' pubsub-connect-node-2)
@@ -64,6 +65,7 @@ log "RUN_ID=$RUN_ID"
 log "ROOM_PREFIX=$ROOM_PREFIX"
 log "USER_PREFIX=$USER_PREFIX"
 log "WS=${WS[*]}"
+log "PUSH_ADDR=$PUSH_ADDR"
 log "ROOMS=$ROOMS USERS_PER_ROOM=$USERS_PER_ROOM TARGET=$TARGET MAXDELAY=$MAXDELAY JOIN_TIMEOUT=$JOIN_TIMEOUT"
 
 log "Step 4: start ${TARGET} connections (${ROOMS} rooms x ${USERS_PER_ROOM} users)"
@@ -102,7 +104,8 @@ for rate in $RATES; do
   push_pids=()
   for i in $(seq 1 "$ROOMS"); do
     rid=$(printf "%s-%02d" "$ROOM_PREFIX" "$i")
-    timeout "$PUSH_TIMEOUT" ./multi_push -room="$rid" -rate="$rate" -dur="$PUSH_DUR" -addr=localhost:18086 >"$LOG_DIR/push-r${rate}-room${i}.log" 2>&1 &
+    env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \
+      timeout "$PUSH_TIMEOUT" ./multi_push -room="$rid" -rate="$rate" -dur="$PUSH_DUR" -addr="$PUSH_ADDR" >"$LOG_DIR/push-r${rate}-room${i}.log" 2>&1 &
     push_pids+=("$!")
   done
   sleep 10
