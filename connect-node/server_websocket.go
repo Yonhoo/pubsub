@@ -115,6 +115,8 @@ var (
 	wsLogger   *log.Logger // WebSocket 专用 logger
 	// CONNECT_NODE_WRITE_TRACE_LOG=1 enables verbose write-tracing logs.
 	enableWriteTraceLog = os.Getenv("CONNECT_NODE_WRITE_TRACE_LOG") == "1"
+	// CONNECT_NODE_SHARED_WRITER_STATS=0 disables per-flush atomic counters on the hot write path.
+	enableSharedWriterStats = os.Getenv("CONNECT_NODE_SHARED_WRITER_STATS") != "0"
 	// Monotonic ID used to bind one websocket session to one shared writer shard.
 	sharedWriteSessionSeq uint64
 )

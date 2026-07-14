@@ -27,6 +27,10 @@ shared_writer:
 leave_queue:
   retry_delay: 350ms
   max_attempts: 5
+room_fanout_aggregator:
+  batch_size: 24
+  flush_interval: 15ms
+  queue_size: 4096
 `)
 
 	cfg := LoadConfigFromFile(path)
@@ -48,6 +52,15 @@ leave_queue:
 	if cfg.LeaveQueue.MaxAttempts != 5 {
 		t.Fatalf("expected max attempts 5, got %d", cfg.LeaveQueue.MaxAttempts)
 	}
+	if cfg.RoomFanoutAggregator.BatchSize != 24 {
+		t.Fatalf("expected room fanout batch size 24, got %d", cfg.RoomFanoutAggregator.BatchSize)
+	}
+	if cfg.RoomFanoutAggregator.FlushInterval != 15*time.Millisecond {
+		t.Fatalf("expected room fanout flush interval 15ms, got %v", cfg.RoomFanoutAggregator.FlushInterval)
+	}
+	if cfg.RoomFanoutAggregator.QueueSize != 4096 {
+		t.Fatalf("expected room fanout queue size 4096, got %d", cfg.RoomFanoutAggregator.QueueSize)
+	}
 }
 
 func TestLoadConfigFromFileCapacityEnvOverridesYAML(t *testing.T) {
@@ -63,6 +76,9 @@ leave_queue:
 	t.Setenv("SHARED_WRITER_QUEUE_SIZE", "4096")
 	t.Setenv("LEAVE_QUEUE_RETRY_DELAY", "900ms")
 	t.Setenv("LEAVE_QUEUE_MAX_ATTEMPTS", "7")
+	t.Setenv("ROOM_FANOUT_AGG_BATCH_SIZE", "40")
+	t.Setenv("ROOM_FANOUT_AGG_FLUSH_INTERVAL", "25ms")
+	t.Setenv("ROOM_FANOUT_AGG_QUEUE_SIZE", "8192")
 
 	cfg := LoadConfigFromFile(path)
 	if cfg.SharedWriter.BatchSize != 96 {
@@ -76,5 +92,14 @@ leave_queue:
 	}
 	if cfg.LeaveQueue.MaxAttempts != 7 {
 		t.Fatalf("expected env max attempts 7, got %d", cfg.LeaveQueue.MaxAttempts)
+	}
+	if cfg.RoomFanoutAggregator.BatchSize != 40 {
+		t.Fatalf("expected env room fanout batch size 40, got %d", cfg.RoomFanoutAggregator.BatchSize)
+	}
+	if cfg.RoomFanoutAggregator.FlushInterval != 25*time.Millisecond {
+		t.Fatalf("expected env room fanout flush interval 25ms, got %v", cfg.RoomFanoutAggregator.FlushInterval)
+	}
+	if cfg.RoomFanoutAggregator.QueueSize != 8192 {
+		t.Fatalf("expected env room fanout queue size 8192, got %d", cfg.RoomFanoutAggregator.QueueSize)
 	}
 }

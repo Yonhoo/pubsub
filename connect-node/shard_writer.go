@@ -45,15 +45,16 @@ type writeEvent struct {
 	handler *gettypkg.ProtoPackageHandler
 	owner   *ProtoMessageHandler
 
-	// 三选一：
-	// - msg: 普通入队，flush 时按 session 编码
-	// - data: 单接收者预编码（房间广播 encode-once 的单投模式）
-	// - batchData: 多接收者批量预编码（房间广播 encode-once 的批量模式），
-	//   同一字节帧分发给 map 里的所有 sessionID，减少 chan send 次数从
-	//   O(房间人数) → O(shard数)。sessionID 字段在此模式下无意义。
-	msg       *proto.Proto
-	data      []byte
-	batchData map[uint64][]byte
+	// Event payload variants:
+	// - msg: encode per session at flush time.
+	// - data: pre-encoded frame for one receiver.
+	// - batchData: per-session pre-encoded frames.
+	// - sessionIDs + batchFrames: same frame batch for many sessions.
+	msg         *proto.Proto
+	data        []byte
+	batchData   map[uint64][]byte
+	sessionIDs  []uint64
+	batchFrames [][]byte
 }
 
 type sharedSessionState struct {
@@ -78,11 +79,6 @@ type flushShard struct {
 	wg   sync.WaitGroup
 
 	sessions map[uint64]*sharedSessionState
-
-	timer        *time.Timer
-	timerC       <-chan time.Time
-	timerArmed   bool
-	nextDeadline time.Time
 }
 
 func newFlushShard(id, batchSize, maxBatchBytes int, flushInterval time.Duration, queueSize int) *flushShard {
@@ -121,18 +117,16 @@ func (s *flushShard) stopAndWait() {
 
 func (s *flushShard) loop() {
 	defer s.wg.Done()
+	ticker := time.NewTicker(s.flushInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case ev := <-s.in:
 			s.handleEvent(ev)
-		case <-s.timerC:
-			s.timerArmed = false
-			s.timerC = nil
-			s.nextDeadline = time.Time{}
+		case <-ticker.C:
 			s.handleTimer()
 		case <-s.stop:
 			s.flushAll()
-			s.stopTimer()
 			return
 		}
 	}
@@ -155,30 +149,26 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 		s.flushState(st, flushTriggerOther)
 		delete(s.sessions, ev.sessionID)
 	case writeEventEnqueue:
-		// 三种模式：单 session (msg/data)、批量 sessions (batchData)
 		switch {
 		case ev.batchData != nil:
-			// 批量模式：同一字节帧分发给 map 里的所有 sessionID（房间广播 batch-enqueue 优化）
 			for sid, frameData := range ev.batchData {
 				st, ok := s.sessions[sid]
 				if !ok || len(frameData) == 0 {
 					continue
 				}
-				st.pending = append(st.pending, frameData)
-				st.pendingBytes += len(frameData)
-				if len(st.pending) == 1 {
-					st.deadline = time.Now().Add(s.flushInterval)
-					s.armTimer(st.deadline)
+				s.enqueueFrame(st, frameData)
+			}
+		case len(ev.sessionIDs) > 0 && len(ev.batchFrames) > 0:
+			for _, sid := range ev.sessionIDs {
+				st, ok := s.sessions[sid]
+				if !ok {
+					continue
 				}
-				switch {
-				case len(st.pending) >= s.batchSize:
-					s.flushState(st, flushTriggerCount)
-				case st.pendingBytes >= s.maxBatchBytes:
-					s.flushState(st, flushTriggerBytes)
+				for _, frameData := range ev.batchFrames {
+					s.enqueueFrame(st, frameData)
 				}
 			}
 		case ev.sessionID > 0:
-			// 单 session 模式（msg 或 data）
 			st, ok := s.sessions[ev.sessionID]
 			if !ok {
 				return
@@ -186,52 +176,45 @@ func (s *flushShard) handleEvent(ev writeEvent) {
 			var data []byte
 			switch {
 			case ev.data != nil:
-				// 预编码快路径（房间广播单投）：直接复用调用方编出的字节，跳过 per-session 重复编码。
 				data = ev.data
 			case ev.msg != nil:
-				// 普通路径：在 flush 时按 session 编码。
 				var err error
 				data, err = st.handler.Write(st.session, ev.msg)
 				if err != nil {
-					wsLog("❌ [SharedWriter] encode failed: %v", err)
+					wsLog("? [SharedWriter] encode failed: %v", err)
 					return
 				}
 			default:
 				return
 			}
-			st.pending = append(st.pending, data)
-			st.pendingBytes += len(data)
-			if len(st.pending) == 1 {
-				st.deadline = time.Now().Add(s.flushInterval)
-				s.armTimer(st.deadline)
-			}
-			switch {
-			case len(st.pending) >= s.batchSize:
-				s.flushState(st, flushTriggerCount)
-			case st.pendingBytes >= s.maxBatchBytes:
-				s.flushState(st, flushTriggerBytes)
-			}
+			s.enqueueFrame(st, data)
 		}
 	}
 }
 
-func (s *flushShard) handleTimer() {
-	now := time.Now()
-	var next time.Time
-	for _, st := range s.sessions {
-		if len(st.pending) == 0 || st.deadline.IsZero() {
-			continue
-		}
-		if !st.deadline.After(now) {
-			s.flushState(st, flushTriggerTimeout)
-			continue
-		}
-		if next.IsZero() || st.deadline.Before(next) {
-			next = st.deadline
-		}
+func (s *flushShard) enqueueFrame(st *sharedSessionState, data []byte) {
+	if st == nil || len(data) == 0 {
+		return
 	}
-	if !next.IsZero() {
-		s.armTimer(next)
+	st.pending = append(st.pending, data)
+	st.pendingBytes += len(data)
+	if len(st.pending) == 1 {
+		st.deadline = time.Now().Add(s.flushInterval)
+	}
+	switch {
+	case len(st.pending) >= s.batchSize:
+		s.flushState(st, flushTriggerCount)
+	case st.pendingBytes >= s.maxBatchBytes:
+		s.flushState(st, flushTriggerBytes)
+	}
+}
+
+func (s *flushShard) handleTimer() {
+	for _, st := range s.sessions {
+		if len(st.pending) == 0 {
+			continue
+		}
+		s.flushState(st, flushTriggerTimeout)
 	}
 }
 
@@ -249,22 +232,17 @@ func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 	bytes := st.pendingBytes
 	owner := st.owner
 
-	if owner != nil {
+	if owner != nil && enableWriteTraceLog {
 		owner.writeTraceStart("shared-batch")
 		defer owner.writeTraceEnd()
 	}
 
-	frames := make([][]byte, 0, len(st.pending))
-	for _, frame := range st.pending {
-		if len(frame) == 0 {
-			continue
-		}
-		frames = append(frames, frame)
-	}
-	written := len(frames)
+	written := len(st.pending)
 	var writeErr error
 	if written > 0 {
-		if _, err := st.session.WriteBytesArray(frames...); err != nil {
+		// pending only contains non-empty encoded frames. Passing the slice directly
+		// avoids allocating/copying a second [][]byte on every connection flush.
+		if _, err := st.session.WriteBytesArray(st.pending...); err != nil {
 			writeErr = err
 		}
 	}
@@ -281,6 +259,9 @@ func (s *flushShard) flushState(st *sharedSessionState, trigger flushTrigger) {
 
 func (s *flushShard) updateOwnerStats(owner *ProtoMessageHandler, pkgs, bytes int, trigger flushTrigger) {
 	owner.markWriteTime()
+	if !enableSharedWriterStats {
+		return
+	}
 	atomic.AddUint64(&owner.batchFlushes, 1)
 
 	switch trigger {
@@ -324,55 +305,6 @@ func (s *flushShard) logBatchFlushIfNeeded(owner *ProtoMessageHandler, pkgs, byt
 		remote = owner.channel.IP
 	}
 	wsLog("✅ [ProtoHandler] batch flush: pkgs=%d bytes=%d remote=%s", pkgs, bytes, remote)
-}
-
-func (s *flushShard) armTimer(deadline time.Time) {
-	if deadline.IsZero() {
-		return
-	}
-	d := time.Until(deadline)
-	if d < 0 {
-		d = 0
-	}
-	if s.timer == nil {
-		s.timer = time.NewTimer(d)
-		s.timerC = s.timer.C
-		s.timerArmed = true
-		s.nextDeadline = deadline
-		return
-	}
-	if s.timerArmed && !deadline.Before(s.nextDeadline) {
-		return
-	}
-	s.drainAndResetTimer(d)
-	s.timerArmed = true
-	s.nextDeadline = deadline
-}
-
-func (s *flushShard) stopTimer() {
-	s.timerArmed = false
-	s.timerC = nil
-	s.nextDeadline = time.Time{}
-	if s.timer != nil {
-		s.drainTimer()
-	}
-}
-
-func (s *flushShard) drainAndResetTimer(d time.Duration) {
-	if s.timerArmed {
-		s.drainTimer()
-	}
-	s.timer.Reset(d)
-	s.timerC = s.timer.C
-}
-
-func (s *flushShard) drainTimer() {
-	if !s.timer.Stop() {
-		select {
-		case <-s.timer.C:
-		default:
-		}
-	}
 }
 
 type sharedWriteManager struct {
@@ -478,6 +410,33 @@ func (m *sharedWriteManager) TryEnqueuePreEncoded(sessionID uint64, data []byte)
 // EnqueueBatch 批量投递（房间广播优化）：同一字节帧分发给一个 shard 内的多个 session。
 // 调用方预先把房间内所有接收者按 shard 分组（via pickShard），每组一次 chan send。
 // 相比 100 人房间 100 次 TryEnqueuePreEncoded（100 次 chan send），现在只有 16 次（shard 数量）。
+
+func (m *sharedWriteManager) EnqueueBatchFrames(shardID int, sessionIDs []uint64, frames [][]byte) error {
+	if m == nil {
+		return fmt.Errorf("shared writer manager nil")
+	}
+	if shardID < 0 || shardID >= len(m.shards) {
+		return fmt.Errorf("invalid shard ID %d", shardID)
+	}
+	if len(sessionIDs) == 0 || len(frames) == 0 {
+		return nil
+	}
+	shard := m.shards[shardID]
+	ev := writeEvent{
+		kind:        writeEventEnqueue,
+		sessionIDs:  append([]uint64(nil), sessionIDs...),
+		batchFrames: append([][]byte(nil), frames...),
+	}
+	select {
+	case shard.in <- ev:
+		return nil
+	case <-shard.stop:
+		return fmt.Errorf("shared writer shard stopped")
+	default:
+		return errSharedWriterQueueFull
+	}
+}
+
 func (m *sharedWriteManager) EnqueueBatch(shardID int, sessionIDs []uint64, data []byte) error {
 	if m == nil {
 		return fmt.Errorf("shared writer manager nil")

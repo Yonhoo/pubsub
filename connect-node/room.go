@@ -4,12 +4,43 @@ import (
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	gettypkg "github.com/livekit/psrpc/examples/pubsub/pkg/getty"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
+	"os"
+	"strconv"
 	"sync"
 )
 
 // 房间广播预编码器：ProtoPackageHandler 完全无状态（codec.go 验证），
 // 编出的字节对所有接收者相同；这里复用一个全局实例避免每次广播分配。
-var roomBroadcastEncoder = gettypkg.NewProtoPackageHandler()
+var (
+	roomBroadcastEncoder = gettypkg.NewProtoPackageHandler()
+
+	// Roomid/Userid are needed for server-side routing, but room broadcast clients
+	// already know which room they joined. Stripping those routing fields from the
+	// outbound frame cuts repeated bytes on every fanout write.
+	stripRoomBroadcastRouteFields = boolEnv("ROOM_BROADCAST_STRIP_ROUTE_FIELDS", false)
+)
+
+func boolEnv(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func outboundRoomBroadcastProto(p *protocol.Proto) *protocol.Proto {
+	if p == nil || !stripRoomBroadcastRouteFields || (p.Roomid == "" && p.Userid == "") {
+		return p
+	}
+	cp := *p
+	cp.Roomid = ""
+	cp.Userid = ""
+	return &cp
+}
 
 type Room struct {
 	ID        string
@@ -18,6 +49,10 @@ type Room struct {
 	drop      bool
 	Online    int32 // dirty read is ok
 	AllOnline int32
+
+	shardGroups      [][]uint64
+	shardGroupCount  int
+	shardGroupsDirty bool
 }
 
 // NewRoom new a room struct, store channel room info.
@@ -27,6 +62,7 @@ func NewRoom(id string) (r *Room) {
 	r.drop = false
 	r.next = nil
 	r.Online = 0
+	r.shardGroupsDirty = true
 	return
 }
 
@@ -41,6 +77,7 @@ func (r *Room) Put(ch *Channel) (err error) {
 		ch.Prev = nil
 		r.next = ch // insert to header
 		r.Online++
+		r.shardGroupsDirty = true
 	} else {
 		err = pkg.ErrRoomDroped
 	}
@@ -64,6 +101,7 @@ func (r *Room) Del(ch *Channel) bool {
 	ch.Next = nil
 	ch.Prev = nil
 	r.Online--
+	r.shardGroupsDirty = true
 	r.drop = r.Online == 0
 	r.rLock.Unlock()
 	return r.drop
@@ -81,7 +119,7 @@ func (r *Room) PushMsg(p *protocol.Proto) {
 	}
 
 	// 编码一次
-	data, err := roomBroadcastEncoder.Write(nil, p)
+	data, err := roomBroadcastEncoder.Write(nil, outboundRoomBroadcastProto(p))
 	if err != nil {
 		// 编码失败回退到逐 channel 的 proto 路径
 		for ch := r.next; ch != nil; ch = ch.Next {
@@ -116,7 +154,7 @@ func (r *Room) PushMsgBatch(p *protocol.Proto, sw *sharedWriteManager) {
 	}
 
 	// 编码一次
-	data, err := roomBroadcastEncoder.Write(nil, p)
+	data, err := roomBroadcastEncoder.Write(nil, outboundRoomBroadcastProto(p))
 	if err != nil {
 		// 编码失败回退
 		for ch := r.next; ch != nil; ch = ch.Next {
@@ -166,4 +204,85 @@ func (r *Room) OnlineNum() int32 {
 		return r.AllOnline
 	}
 	return r.Online
+}
+
+func (r *Room) rebuildShardGroups(sw *sharedWriteManager, shardCount int) {
+	r.rLock.Lock()
+	defer r.rLock.Unlock()
+	if r.drop || (!r.shardGroupsDirty && r.shardGroupCount == shardCount) {
+		return
+	}
+	if cap(r.shardGroups) < shardCount {
+		r.shardGroups = make([][]uint64, shardCount)
+	} else {
+		r.shardGroups = r.shardGroups[:shardCount]
+	}
+	for i := range r.shardGroups {
+		r.shardGroups[i] = r.shardGroups[i][:0]
+	}
+	for ch := r.next; ch != nil; ch = ch.Next {
+		if ch.writeSessionID == 0 {
+			continue
+		}
+		shardID := sw.PickShardID(ch.writeSessionID)
+		r.shardGroups[shardID] = append(r.shardGroups[shardID], ch.writeSessionID)
+	}
+	r.shardGroupCount = shardCount
+	r.shardGroupsDirty = false
+}
+
+// PushMsgBatchMany batches multiple room messages into the shared writer in one shard enqueue per flush.
+func (r *Room) PushMsgBatchMany(protos []*protocol.Proto, sw *sharedWriteManager) {
+	if len(protos) == 0 {
+		return
+	}
+	if len(protos) == 1 {
+		r.PushMsgBatch(protos[0], sw)
+		return
+	}
+	if sw == nil {
+		for _, p := range protos {
+			r.PushMsg(p)
+		}
+		return
+	}
+
+	frames := make([][]byte, 0, len(protos))
+	for _, p := range protos {
+		if p == nil {
+			continue
+		}
+		data, err := roomBroadcastEncoder.Write(nil, outboundRoomBroadcastProto(p))
+		if err != nil {
+			r.PushMsgBatch(p, sw)
+			continue
+		}
+		frames = append(frames, data)
+	}
+	if len(frames) == 0 {
+		return
+	}
+
+	shardCount := sw.ShardCount()
+	for {
+		r.rLock.RLock()
+		if r.drop {
+			r.rLock.RUnlock()
+			return
+		}
+		if !r.shardGroupsDirty && r.shardGroupCount == shardCount {
+			for shardID, sids := range r.shardGroups {
+				if len(sids) == 0 {
+					continue
+				}
+				if err := sw.EnqueueBatchFrames(shardID, sids, frames); err != nil {
+					recordCriticalDrop("shared_writer_batch", sharedWriterDropReason(err))
+				}
+			}
+			r.rLock.RUnlock()
+			return
+		}
+		r.rLock.RUnlock()
+		r.rebuildShardGroups(sw, shardCount)
+	}
 }

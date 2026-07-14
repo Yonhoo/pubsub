@@ -28,18 +28,19 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Server       *ServerConfig
-	Database     *DatabaseConfig
-	Redis        *RedisConfig
-	ETCD         *ETCDConfig
-	Room         *RoomConfig
-	Bucket       *BucketConfig
-	TCPConfig    *TcpConfig
-	Protocol     *Protocol
-	SharedWriter *SharedWriterConfig
-	LeaveQueue   *LeaveQueueConfig
-	RpcConfig    *RpcConfig
-	GettyConfig  *GettyConfig
+	Server               *ServerConfig
+	Database             *DatabaseConfig
+	Redis                *RedisConfig
+	ETCD                 *ETCDConfig
+	Room                 *RoomConfig
+	Bucket               *BucketConfig
+	TCPConfig            *TcpConfig
+	Protocol             *Protocol
+	SharedWriter         *SharedWriterConfig
+	LeaveQueue           *LeaveQueueConfig
+	RoomFanoutAggregator *RoomFanoutAggregatorConfig
+	RpcConfig            *RpcConfig
+	GettyConfig          *GettyConfig
 }
 
 type GettySessionParam struct {
@@ -110,6 +111,12 @@ type SharedWriterConfig struct {
 type LeaveQueueConfig struct {
 	RetryDelay  time.Duration
 	MaxAttempts int
+}
+
+type RoomFanoutAggregatorConfig struct {
+	BatchSize     int
+	FlushInterval time.Duration
+	QueueSize     int
 }
 
 type TcpConfig struct {
@@ -247,6 +254,11 @@ func LoadConfigFromFile(filename string) *Config {
 		LeaveQueue: &LeaveQueueConfig{
 			RetryDelay:  getEnvOrYAMLDuration(yamlCfg, "LEAVE_QUEUE_RETRY_DELAY", "leave_queue.retry_delay", 200*time.Millisecond),
 			MaxAttempts: getEnvOrYAMLInt(yamlCfg, "LEAVE_QUEUE_MAX_ATTEMPTS", "leave_queue.max_attempts", 3),
+		},
+		RoomFanoutAggregator: &RoomFanoutAggregatorConfig{
+			BatchSize:     getEnvOrYAMLInt(yamlCfg, "ROOM_FANOUT_AGG_BATCH_SIZE", "room_fanout_aggregator.batch_size", 32),
+			FlushInterval: getEnvOrYAMLDuration(yamlCfg, "ROOM_FANOUT_AGG_FLUSH_INTERVAL", "room_fanout_aggregator.flush_interval", 5*time.Millisecond),
+			QueueSize:     getEnvOrYAMLInt(yamlCfg, "ROOM_FANOUT_AGG_QUEUE_SIZE", "room_fanout_aggregator.queue_size", 1024),
 		},
 		GettyConfig: &GettyConfig{
 			AppName:         getEnvOrYAMLStr(yamlCfg, "GETTY_APP_NAME", "getty.app_name", "pubsub-server"),

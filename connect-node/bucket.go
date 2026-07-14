@@ -15,6 +15,11 @@ var (
 	errBucketStopped   = errors.New("bucket routine stopped")
 )
 
+type roomBroadcastTask struct {
+	RoomID string
+	Protos []*protocol.Proto
+}
+
 type Bucket struct {
 	c     *config.BucketConfig
 	cLock sync.RWMutex        // protect the channels for chs
@@ -30,7 +35,7 @@ type Bucket struct {
 	snapshotPool sync.Pool
 
 	// goim-style worker pool for room broadcast
-	routines    []chan *push.BroadcastRoomReq
+	routines    []chan *roomBroadcastTask
 	routinesNum uint64
 	sw          *sharedWriteManager
 	routineWG   sync.WaitGroup
@@ -62,9 +67,9 @@ func NewBucket(c *config.BucketConfig, sw *sharedWriteManager) (b *Bucket) {
 		routineSize = 1024
 	}
 
-	b.routines = make([]chan *push.BroadcastRoomReq, routineAmount)
+	b.routines = make([]chan *roomBroadcastTask, routineAmount)
 	for i := uint64(0); i < routineAmount; i++ {
-		ch := make(chan *push.BroadcastRoomReq, routineSize)
+		ch := make(chan *roomBroadcastTask, routineSize)
 		b.routines[i] = ch
 		b.routineWG.Add(1)
 		go b.roomproc(ch)
@@ -308,8 +313,15 @@ func (b *Bucket) DelRoom(room *Room) {
 	room.Close()
 }
 
-func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) (err error) {
+func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) error {
 	if arg == nil || arg.RoomID == "" || arg.Proto == nil {
+		return nil
+	}
+	return b.BroadcastRoomBatch(&roomBroadcastTask{RoomID: arg.RoomID, Protos: []*protocol.Proto{arg.Proto}})
+}
+
+func (b *Bucket) BroadcastRoomBatch(task *roomBroadcastTask) (err error) {
+	if task == nil || task.RoomID == "" || len(task.Protos) == 0 {
 		return nil
 	}
 	if atomic.LoadUint32(&b.stopped) != 0 {
@@ -317,33 +329,30 @@ func (b *Bucket) BroadcastRoom(arg *push.BroadcastRoomReq) (err error) {
 	}
 	num := atomic.AddUint64(&b.routinesNum, 1) % uint64(len(b.routines))
 	ch := b.routines[num]
-
 	defer func() {
-		if r := recover(); r != nil {
+		if recover() != nil {
 			err = errBucketStopped
 		}
 	}()
-
 	select {
-	case ch <- arg:
+	case ch <- task:
 		return nil
 	default:
 		recordCriticalDrop("bucket_room_queue", "queue_full")
-		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] routine queue full: roomID=%s", arg.RoomID)
+		hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] routine queue full: roomID=%s", task.RoomID)
 		return errBucketQueueFull
 	}
 }
 
-
-// roomproc is the worker loop — reads from routine chan and pushes to room.
-func (b *Bucket) roomproc(ch chan *push.BroadcastRoomReq) {
+// roomproc is the worker loop ? reads from routine chan and pushes to room.
+func (b *Bucket) roomproc(ch chan *roomBroadcastTask) {
 	defer b.routineWG.Done()
 	for arg := range ch {
-		if arg == nil || arg.RoomID == "" || arg.Proto == nil {
+		if arg == nil || arg.RoomID == "" || len(arg.Protos) == 0 {
 			continue
 		}
 		if room := b.Room(arg.RoomID); room != nil {
-			room.PushMsgBatch(arg.Proto, b.sw)
+			room.PushMsgBatchMany(arg.Protos, b.sw)
 		} else {
 			hotLogEvery(&b.lastRoomMissLogNano, 3*time.Second, "[Bucket] Room missing: roomID=%s", arg.RoomID)
 		}

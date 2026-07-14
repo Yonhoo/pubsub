@@ -17,10 +17,6 @@ benchmark/multi_push
 bench_client
 bench_client_v2
 multi_push
-controller-manager
-connect-node
-push-manager
-web
 
 # Go test binaries
 *.test
@@ -57,3 +53,12 @@ SINGLE_ROOM_VS_MULTI_ROOM.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Local benchmark/profiling artifacts
+benchmark/logs*/
+benchmark/**/pprof/
+benchmark/**/*.pprof
+benchmark/**/*.top.txt
+benchmark/logs*.nohup
+docker-compose.yml.before_*
+*.before_*

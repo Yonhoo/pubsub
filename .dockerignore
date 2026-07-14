@@ -56,3 +56,13 @@ logs/
 logs_*/
 benchmark/*.log
 benchmark/*.out
+
+# Local benchmark/profiling artifacts
+benchmark/logs*/
+benchmark/**/pprof/
+benchmark/**/*.pprof
+benchmark/**/*.top.txt
+benchmark/**/*.log
+benchmark/logs*.nohup
+docker-compose.yml.before_*
+*.before_*

@@ -1,7 +1,7 @@
 package main
 
 import (
-		"net"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,19 +23,19 @@ type mockGettySession struct {
 	attributes map[any]any
 }
 
-func (m *mockGettySession) Reset() {}
-func (m *mockGettySession) Conn() net.Conn { return nil }
-func (m *mockGettySession) Stat() string { return "mock-session" }
-func (m *mockGettySession) IsClosed() bool { return m.closed.Load() }
-func (m *mockGettySession) EndPoint() getty.EndPoint { return nil }
-func (m *mockGettySession) SetMaxMsgLen(int) {}
-func (m *mockGettySession) SetName(string) {}
+func (m *mockGettySession) Reset()                               {}
+func (m *mockGettySession) Conn() net.Conn                       { return nil }
+func (m *mockGettySession) Stat() string                         { return "mock-session" }
+func (m *mockGettySession) IsClosed() bool                       { return m.closed.Load() }
+func (m *mockGettySession) EndPoint() getty.EndPoint             { return nil }
+func (m *mockGettySession) SetMaxMsgLen(int)                     {}
+func (m *mockGettySession) SetName(string)                       {}
 func (m *mockGettySession) SetEventListener(getty.EventListener) {}
-func (m *mockGettySession) SetPkgHandler(getty.ReadWriter) {}
-func (m *mockGettySession) SetReader(getty.Reader) {}
-func (m *mockGettySession) SetWriter(getty.Writer) {}
-func (m *mockGettySession) SetCronPeriod(int) {}
-func (m *mockGettySession) SetWaitTime(time.Duration) {}
+func (m *mockGettySession) SetPkgHandler(getty.ReadWriter)       {}
+func (m *mockGettySession) SetReader(getty.Reader)               {}
+func (m *mockGettySession) SetWriter(getty.Writer)               {}
+func (m *mockGettySession) SetCronPeriod(int)                    {}
+func (m *mockGettySession) SetWaitTime(time.Duration)            {}
 func (m *mockGettySession) GetAttribute(key any) any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -85,24 +85,24 @@ func (m *mockGettySession) WriteBytesArray(pkgs ...[]byte) (int, error) {
 	}
 	return total, nil
 }
-func (m *mockGettySession) Close() { m.closed.Store(true) }
+func (m *mockGettySession) Close()                                        { m.closed.Store(true) }
 func (m *mockGettySession) AddCloseCallback(any, any, getty.CallBackFunc) {}
-func (m *mockGettySession) RemoveCloseCallback(any, any) {}
-func (m *mockGettySession) ID() uint32 { return 1 }
-func (m *mockGettySession) SetCompressType(getty.CompressType) {}
-func (m *mockGettySession) LocalAddr() string { return "local" }
-func (m *mockGettySession) RemoteAddr() string { return "remote" }
-func (m *mockGettySession) IncReadPkgNum() {}
-func (m *mockGettySession) IncWritePkgNum() {}
-func (m *mockGettySession) UpdateActive() {}
-func (m *mockGettySession) GetActive() time.Time { return time.Now() }
-func (m *mockGettySession) ReadTimeout() time.Duration { return m.readTO }
-func (m *mockGettySession) SetReadTimeout(d time.Duration) { m.readTO = d }
-func (m *mockGettySession) WriteTimeout() time.Duration { return m.writeTO }
-func (m *mockGettySession) SetWriteTimeout(d time.Duration) { m.writeTO = d }
-func (m *mockGettySession) Send(any) (int, error) { return 0, nil }
-func (m *mockGettySession) CloseConn(int) {}
-func (m *mockGettySession) SetSession(getty.Session) {}
+func (m *mockGettySession) RemoveCloseCallback(any, any)                  {}
+func (m *mockGettySession) ID() uint32                                    { return 1 }
+func (m *mockGettySession) SetCompressType(getty.CompressType)            {}
+func (m *mockGettySession) LocalAddr() string                             { return "local" }
+func (m *mockGettySession) RemoteAddr() string                            { return "remote" }
+func (m *mockGettySession) IncReadPkgNum()                                {}
+func (m *mockGettySession) IncWritePkgNum()                               {}
+func (m *mockGettySession) UpdateActive()                                 {}
+func (m *mockGettySession) GetActive() time.Time                          { return time.Now() }
+func (m *mockGettySession) ReadTimeout() time.Duration                    { return m.readTO }
+func (m *mockGettySession) SetReadTimeout(d time.Duration)                { m.readTO = d }
+func (m *mockGettySession) WriteTimeout() time.Duration                   { return m.writeTO }
+func (m *mockGettySession) SetWriteTimeout(d time.Duration)               { m.writeTO = d }
+func (m *mockGettySession) Send(any) (int, error)                         { return 0, nil }
+func (m *mockGettySession) CloseConn(int)                                 {}
+func (m *mockGettySession) SetSession(getty.Session)                      {}
 
 func (m *mockGettySession) writeBatches() [][][]byte {
 	m.mu.Lock()

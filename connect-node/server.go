@@ -20,6 +20,7 @@ import (
 	getty "github.com/AlexStocks/getty/transport"
 	"github.com/livekit/psrpc/examples/pubsub/pkg"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/controller"
+	"github.com/livekit/psrpc/examples/pubsub/protocol/protocol"
 	"github.com/livekit/psrpc/examples/pubsub/protocol/push"
 	"github.com/zhenjl/cityhash"
 	"google.golang.org/grpc"
@@ -61,6 +62,8 @@ type ConnectNodeServer struct {
 
 	// Shared writer for websocket session flush.
 	sharedWriter *sharedWriteManager
+
+	roomFanoutAggregator *roomFanoutAggregatorManager
 
 	// Leave queue for async LeaveRoom RPC calls
 	leaveQueue          chan *leaveTask
@@ -205,6 +208,7 @@ func NewConnectNodeServer(
 		sharedWriterCfg.QueueSize,
 	)
 	server.sharedWriter.Start()
+	server.roomFanoutAggregator = newRoomFanoutAggregatorManager(server, cfg.RoomFanoutAggregator)
 
 	for i := 0; i < cfg.Bucket.Size; i++ {
 		server.buckets[i] = NewBucket(cfg.Bucket, server.sharedWriter)
@@ -276,6 +280,9 @@ func (s *ConnectNodeServer) Stop() {
 			case <-time.After(drainTimeout):
 				timedOut = true
 			}
+		}
+		if s.roomFanoutAggregator != nil {
+			s.roomFanoutAggregator.Stop()
 		}
 		if sharedWriter != nil {
 			sharedWriter.Stop()
@@ -721,39 +728,25 @@ func (s *ConnectNodeServer) BroadcastRoom(ctx context.Context, req *push.Broadca
 		return nil, err
 	}
 	s.queueStateMu.RUnlock()
-
-	// goim comet model: fan-out to all buckets (like goim grpc/server.go BroadcastRoom)
 	atomic.AddInt64(&s.roomAccepted, 1)
-	atomic.AddInt64(&s.roomStarted, 1)
-
-	fullCount := 0
-	stoppedCount := 0
-	for _, bucket := range s.Buckets() {
-		if err := bucket.BroadcastRoom(req); err != nil {
-			if errors.Is(err, errBucketStopped) {
-				stoppedCount++
-				continue
+	if s.roomFanoutAggregator == nil {
+		atomic.AddInt64(&s.roomStarted, 1)
+		err := s.broadcastRoomBatch(req.RoomID, []*protocol.Proto{req.Proto})
+		atomic.AddInt64(&s.roomCompleted, 1)
+		if err != nil {
+			if errors.Is(err, errBucketQueueFull) {
+				return nil, status.Error(codes.ResourceExhausted, "all bucket room queues full")
 			}
-			fullCount++
-		}
-	}
-	atomic.AddInt64(&s.roomCompleted, 1)
-
-	if stoppedCount > 0 {
-		s.queueStateMu.RLock()
-		state := s.queueState
-		s.queueStateMu.RUnlock()
-		if state != queueStateRunning {
-			err := queueStateErr(state)
-			s.recordEnqueueFailure("broadcast_queue", err)
 			return nil, err
 		}
+		return &push.BroadcastRoomReply{}, nil
 	}
-
-	// If all buckets' queues are full, fail the request
-	if fullCount > 0 && fullCount == len(s.buckets) {
-		s.recordEnqueueFailure("broadcast_queue", errBucketQueueFull)
-		return nil, status.Error(codes.ResourceExhausted, "all bucket room queues full")
+	if err := s.roomFanoutAggregator.Enqueue(req.RoomID, req.Proto); err != nil {
+		s.recordEnqueueFailure("broadcast_queue", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, status.Error(codes.ResourceExhausted, "room fanout aggregator queue full")
+		}
+		return nil, err
 	}
 	return &push.BroadcastRoomReply{}, nil
 }

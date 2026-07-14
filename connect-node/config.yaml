@@ -38,26 +38,31 @@ bucket:
   channel: 10240  # 增加到 10240（原来 1024）
   room: 4096
   routine_amount: 64
-  routine_size: 8192
+  routine_size: 4096
   routine_backpressure_timeout: 200ms
 
 # Protocol 配置
 protocol:
   timer: 32
   timer_size: 2048
-  svr_proto: 10240  # signal channel 缓冲区大小（增加到 10240）
+  svr_proto: 1024  # signal channel 缓冲区大小
   cli_proto: 5      # 客户端请求队列大小
   handshake_timeout: 5s
 
 shared_writer:
   batch_size: 64
   max_batch_bytes: 262144
-  flush_interval: 10ms
+  flush_interval: 50ms
   queue_size: 16384
 
 leave_queue:
   retry_delay: 200ms
   max_attempts: 3
+
+room_fanout_aggregator:
+  batch_size: 32
+  flush_interval: 50ms
+  queue_size: 4096
 
 # Getty WebSocket 配置
 getty:
